@@ -21,7 +21,7 @@
 | 决策点 | 选择 | 说明 |
 |---|---|---|
 | 代理引擎 | **自动下载 mihomo 二进制** | 我下载、生成配置、启动、用 RESTful API 控制。支持订阅全部协议。 |
-| 代理影响范围 | **只影响本程序** | mihomo 不开 TUN，只开本地 HTTP/SOCKS 端口（127.0.0.1:7890），系统其他程序不受影响。 |
+| 代理影响范围 | **只影响本程序** | mihomo不开 TUN，只开本地 HTTP/SOCKS/控制API/DNS 端口（均为自动挑选的不常见高位端口，避免跟用户机器上已有的 mihomo/clash冲突，见十六节），系统其他程序不受影响。 |
 | 访问方式 | **httpx 优先，playwright 回退** | 日常 httpx+代理；遇 Cloudflare/登录失败自动起 playwright。 |
 | 工具形态 | **CLI** | `zlib search "书名"` / `zlib download`。交互走终端。 |
 | 减少访问 | **一次搜索拿全信息** | 搜索结果包含下载所需的 book id/hash，用户选择后直接构造下载请求，不二次搜索。 |
@@ -33,16 +33,20 @@
 
 ### 模块划分
 
+> 以下为当前实际结构（历史开发记录中出现的旧模块名/端口号等以下方"开发记录"章节
+> 为准，反映的是发生时的状态，可能与现状不同）。
+
 ```
-src/zlib/
-├── cli.py              # CLI 入口
+src/zlibrary/
+├── cli.py              # CLI 入口（search/download/status/stop/logout/add-account/upgrade-mihomo）
 ├── config.py           # 配置加载
+├── subscription.py     # 订阅拉取 + 解析
+├── proxy_manager.py    # mihomo 全生命周期（含随包引导/端口自动选择/代理升级）+ 测速选优+ 节点轮换
+├── challenge.py        # 站点浏览器校验（SHA-1 PoW）求解
 ├── site_finder.py      # [低优] web 搜索官网，结果缓存
-├── site_checker.py     # 直连测试连通性
-├── proxy_manager.py    # 订阅解析→mihomo→测速→选最优→切换
+├── site_checker.py     # 连通性检测（校验响应确实来自 Z-Library）
 ├── accounts.py         # 账密管理器：轮换、次数跟踪
-├── client.py           # Z-Library 客户端：登录/搜索/下载
-└── downloader.py       # 文件落盘
+└── client.py           # Z-Library 客户端：登录/搜索/下载（下载落盘逻辑也在这里，没有独立的 downloader.py）
 ```
 
 ### 全链路流程
@@ -65,20 +69,24 @@ src/zlib/
 
 ### 1. mihomo (Clash.Meta) 控制
 
-- **不依赖系统 clash**：自动下载 mihomo 二进制到 `data/mihomo`。
-- **非 TUN 模式**：配置只开 `port`(HTTP) 和 `socks-port`，不开 `tun.enable`。这样只有显式走 127.0.0.1:7890 的请求才代理，系统其他程序不受影响。
-- **RESTful API**（默认 127.0.0.1:9090）：
+- **不依赖系统 clash**：随包自带二进制，本地解压到 `data/mihomo`（见十五节），无需联网。
+- **非 TUN 模式**：配置只开 `mixed-port`(HTTP+SOCKS) 和 `socks-port`，不开 `tun.enable`。
+  只有显式走本地代理端口的请求才被代理，系统其他程序不受影响。
+- **本地端口自动选择**（见十六节）：HTTP/SOCKS/控制API/DNS 四类端口默认不写死为
+  7890/7891/9090 这类常见默认值，而是从内置的一组不常见高位端口候选里探测选一个
+  当前空闲的，避免跟用户机器上已有的 mihomo/clash抢端口。
+- **RESTful API**：
   - `GET /proxies`：列出所有代理组和节点
   - `GET /proxies/{name}/delay?url=...&timeout=...`：测某节点到目标 URL 的延迟
   - `PUT /proxies/{group}` + `{name}`：切换选择器组的当前节点
 - **配置生成**：把订阅的 proxies 直接放进 mihomo config，selector 组手动构造，方便 API 切换。
-- **外部控制**：`external-controller: 127.0.0.1:9090`，可设 `secret`。
+- **外部控制**：`external-controller`指向自动选中的 API 端口，`secret` 走 config.yaml 里配置的固定值。
 
 ### 2. httpx + playwright 回退
 
-- httpx 配 `proxies=http://127.0.0.1:7890`，带合理 UA 和 header。
-- 检测 Cloudflare 拦截：状态 403/503 + 响应含 `cf-` 头或 `Just a moment` / `challenge` 字样 → 自动起 playwright 走代理。
-- playwright 用 chromium，`proxy={"server": "http://127.0.0.1:7890"}`。
+- httpx 配代理 URL（`http://127.0.0.1:{自动选中的端口}`），带合理 UA 和 header。
+- 检测浏览器校验挑战：见十三节，纯 SHA-1 PoW，代码里自动解，不依赖 Cloudflare 判断逻辑。
+- playwright 用 chromium，同样走本地自动选中的代理端口，仅作为httpx 失败时的最后回退。
 
 ### 3. 账号轮换
 
@@ -97,19 +105,22 @@ src/zlib/
 
 ## 五、配置文件
 
-### config.yaml
+实际模板见 `config.example.yaml`/`accounts.example.yaml`（提交到仓库），
+真实的 `config.yaml`/`accounts.yaml`（含真实token/密码）已 gitignore，不提交。
+端口字段现在默认留空由程序自动选择，不再像下面这个早期示例一样写死具体端口号
+（写死端口是十六节修复前的旧状态，仅作历史参照）：
+
+### config.yaml（早期示例，端口部分已过时）
 
 ```yaml
-subscription_url: "https://msub.xn--m7r52rosihxm.com/api/v1/client/subscribe?token=..."
+subscription_url: "https://your-subscription-provider.example.com/api/v1/client/subscribe?token=..."
 default_site: "https://zh.z-library.sk"
 download_dir: "~/Downloads/zlibrary"
 format_preference: ["epub", "pdf", "mobi", "azw3"]
 mihomo:
   binary_path: "data/mihomo"
-  http_port: 7890
-  socks_port: 7891
-  api_port: 9090
   api_secret: "zlib-local"
+  # http_port/socks_port/api_port/dns_port 留空即可，自动选择空闲端口（见十六节）
 ```
 
 ### accounts.yaml
@@ -129,7 +140,7 @@ accounts:
 ### 2025-08-08 启动
 
 - 订阅拉取：直接 curl 被 reset（`Connection reset by peer`）。换 clash UA 仍慢/超时。
-- **踩坑#1**：订阅域名 `msub.xn--m7r52rosihxm.com` 是 punycode（中文域名转码），DNS 解析或 TLS 在当前网络可能被干扰。**结论**：订阅拉取在用户真实环境运行时再验证，代码层做好 UA 设置和重试。
+- **踩坑#1**：订阅域名是punycode（中文域名转码）形式，DNS 解析或 TLS 在当前网络可能被干扰。**结论**：订阅拉取在用户真实环境运行时再验证，代码层做好 UA 设置和重试。
 - 决定：不阻塞于订阅拉取，先写代码，用 mock 订阅验证解析逻辑。
 
 ### 2025-08-08 包名冲突
@@ -613,3 +624,66 @@ GitHub 去下载 mihomo。用户的方案：随包自带一份 mihomo，装好�
 - `data/mock_sub.yaml`（测试用假订阅fixture，非真实节点）移到 `tests/fixtures/`，
   这样 `data/` 可以完整地整体 gitignore，不用为了保留这一个无害文件单独开洞。
 - 清掉 `src/zlib.egg-info/`、`__pycache__/`（构建产物，`pip install -e .` 会自动重新生成）。
+
+## 十六、2026-08-10 端口冲突规避：自动挑选不常见空闲端口，不再硬编默认端口
+
+打包给别人用后暴露了一个新问题：本工具用的 mihomo **只服务于本工具自己**，跟用户
+机器上可能已经在跑的另一个 mihomo/clash（很多人本来就常驻一个梯子）是两个完全独立
+的进程，但此前配置里硬编码的 `http_port: 7890` / `socks_port: 7891` / `api_port: 9090`
+恰好是 clash 系工具最常用的默认端口——如果用户机器上已经有一个 clash 在跑，这三个端口
+大概率被占用，会导致 mihomo 启动失败或者（更隐蔽地）意外抢占/干扰对方。
+
+### 方案：候选端口列表 + 探测 + 持久化
+
+`proxy_manager.py` 新增四组写死的候选端口（每类5个，故意用不常见的高位端口，
+四类互不重叠，避开7890/7891/9090 这些默认值）：
+
+```python
+_HTTP_PORT_CANDIDATES= [17890, 27890, 37890, 47890, 57890]
+_SOCKS_PORT_CANDIDATES = [17891, 27891, 37891, 47891, 57891]
+_API_PORT_CANDIDATES   = [17892, 27892, 37892, 47892, 57892]
+_DNS_PORT_CANDIDATES   = [17893, 27893, 37893, 47893, 57893]
+```
+
+新增 `ensure_ports()`：对每一类端口，用 `socket.bind()`（而非 `connect()`——bind 才能
+真正证明"这个端口现在能被我占住"，connect 失败只能证明"没人在监听"）逐个探测，
+候选顺序是「用户在 config.yaml 里显式配置的值（若有，最高优先级）→ 上次持久化选中的值
+（若仍空闲，尽量让端口在多次重启之间保持稳定）→ 内置候选列表」，选中第一个探测通过的。
+四类全部占满才报错，报错信息里明确提示可以在 config.yaml 手动指定端口自救。
+
+结果持久化进 `state.json` 的 `ports` 字段（与已有的 `node` 字段共享同一个文件）。
+这里顺手修了一个潜在 bug：原来的 `_save_state()` 是整体覆盖写入，`ensure_ports()`
+存的 `ports` 和 `rotate_node()`/`select_best()` 存的 `node` 是两个独立调用方各自
+维护的字段，谁后调用就会把对方刚存的字段整个抹掉；改成先读旧内容再 `dict.update()`
+合并后再写回。
+
+`MihomoConfig` 里 `http_port`/`socks_port`/`api_port`/`dns_port` 四个字段全部改成
+`int | None = None`（原来是必填的 int），语义变成"留空 = 交给自动挑选"；
+`config.example.yaml`/`config.yaml` 相应把固定端口那几行注释掉，只在文档里提示
+"有特殊需求要固定端口才需要手动填"。
+
+### 调用时机的两个细节坑
+
+1. **端口探测必须在确认"当前没有正在运行的实例"之后才做**，否则会把自己已经占着的
+   端口误判成"被占用、需要换"。所以`ensure_ports()` 只在 `start()` 内、`is_running()`
+   判定为 False 之后才调用；而 `__init__` 里单独有一个轻量的 `_load_persisted_ports()`
+   （只读取 state.json，不做任何探测），确保 `zlib status`/`zlib stop` 这类不经过
+   `start()` 的命令，也能知道去问哪个端口才能找到已经在跑的实例，而不是拿
+   config.yaml 里的默认值（现在是 None）去问一个必然错误的端口、把"在运行"误判成
+   "未运行"。
+2. **`setup_and_select_best()` 原来的调用顺序是"生成配置→启动"**，但生成配置这一步
+   要往yaml 里写 `mixed-port`/`socks-port`/`external-controller` 等，必须用解析后的
+   端口——而端口解析这时候还没发生（在 `start()`内部才做）。改成端口解析和生成配置都
+   挪到 `start()` 内部顺序执行（`ensure_ports() → ensure_binary() → generate_config()`
+   → 启动进程），`setup_and_select_best()` 直接调 `start()`，不再在外面单独调一次
+   `generate_config()`（避免用尚未解析的陈旧端口生成一份马上被扔掉的配置）。
+
+### 验证
+- 离线验证候选跳过逻辑：故意用 `socket.bind()` 占住 http 的前2 个候选端口和 api的
+  第 1 个候选端口，调用 `ensure_ports()`，确认自动跳到下一个空闲候选（http 选中第3
+  候选、api 选中第 2 候选），且新建的 `ProxyManager` 实例能从持久化状态正确读回同一
+  组端口。
+- 真实端到端验证：先手动结束残留的 mihomo 进程、清空 `state.json` 里的端口记录，
+  模拟"全新首次运行"，执行 `zlib search`，日志确认：`本地端口: http=17890 socks=17891
+  api=17892 dns=17893`（全部命中第一候选，因为环境干净），随后完整走通登录+搜索51条
+  结果；`zlib status` 也正确报告出这组端口，而不是旧的 7890/9090。

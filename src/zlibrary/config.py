@@ -17,15 +17,18 @@ def project_root() -> Path:
 @dataclass
 class MihomoConfig:
     binary_path: str
-    http_port: int
-    socks_port: int
-    api_port: int
     api_secret: str
     work_dir: str
     test_url: str
     test_timeout_ms: int
+    # 端口默认留空，由 ProxyManager 自动从内置的一组不常见端口里挑选当前空闲的
+    # （避免跟用户机器上可能已经在跑的另一个 mihomo/clash 抢占默认端口 7890/7891/9090）。
+    # 只有用户在 config.yaml 里显式指定时才会优先尝试这个值。
+    http_port: int | None = None
+    socks_port: int | None = None
+    api_port: int | None = None
+    dns_port: int | None = None  # mihomo 内置 DNS 监听端口（仅本机，用于 fake-ip 防投毒）
     subscription_cache_hours: float = 24
-    dns_port: int = 1053  # mihomo 内置 DNS 监听端口（仅本机，用于 fake-ip 防投毒）
 
     def binary_abs(self) -> Path:
         p = Path(self.binary_path)
@@ -79,15 +82,15 @@ class Config:
             format_preference=data.get("format_preference", ["epub", "pdf"]),
             mihomo=MihomoConfig(
                 binary_path=m["binary_path"],
-                http_port=m["http_port"],
-                socks_port=m["socks_port"],
-                api_port=m["api_port"],
                 api_secret=m["api_secret"],
                 work_dir=m["work_dir"],
                 test_url=m["test_url"],
                 test_timeout_ms=m["test_timeout_ms"],
+                http_port=m.get("http_port"),
+                socks_port=m.get("socks_port"),
+                api_port=m.get("api_port"),
+                dns_port=m.get("dns_port"),
                 subscription_cache_hours=m.get("subscription_cache_hours", 24),
-                dns_port=m.get("dns_port", 1053),
             ),
             site_finder=SiteFinderConfig(
                 enabled=data["site_finder"]["enabled"],

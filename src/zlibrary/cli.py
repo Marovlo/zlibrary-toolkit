@@ -58,9 +58,14 @@ def _ensure_access(cfg: Config):
     from .proxy_manager import ProxyManager
 
     pm = ProxyManager(cfg)
-    best = pm.setup_and_select_best()
+    try:
+        best = pm.setup_and_select_best()
+    except RuntimeError as e:
+        # 端口耗尽（ensure_ports 里全部候选都被占用）等场景，转成干净的 CLI 报错，
+        # 不让用户看到 Python traceback。
+        raise click.ClickException(str(e)) from e
     if not best:
-        raise click.ClickException("无可用代理节点能连通 Z-Library")
+        raise click.ClickException("无可用代理节点能连通Z-Library")
     log.info("✓ 选定代理节点: %s (%dms)", best.name, best.delay_ms)
     _ensure_site_reachable(pm, site)
     return site, pm.proxy_url(), pm
@@ -368,7 +373,9 @@ def status() -> None:
     pm = ProxyManager(cfg)
     if pm.is_running():
         node = pm.current_node() or "未知"
-        click.echo(f"代理:运行中 (节点: {node}, API 127.0.0.1:{pm.mcfg.api_port})")
+        click.echo(f"代理: 运行中 (节点: {node})")
+        click.echo(f"本地端口: HTTP/SOCKS 127.0.0.1:{pm.mcfg.http_port}，"
+                   f"控制API 127.0.0.1:{pm.mcfg.api_port}")
     else:
         click.echo("代理: 未运行")
     click.echo(f"mihomo 版本: {pm.binary_version()}")

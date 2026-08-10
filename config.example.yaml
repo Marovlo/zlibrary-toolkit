@@ -14,12 +14,9 @@ download_dir: "~/Downloads/zlibrary"
 # 格式偏好（按优先级，搜索结果含多格式时按此选）
 format_preference: ["epub", "pdf", "mobi", "azw3"]
 
-# mihomo 配置
+# mihomo配置
 mihomo:
   binary_path: "data/mihomo"        # 二进制相对路径（首次运行会自动从vendor/ 解压出来，无需手动下载）
-  http_port: 7890                    # 本地 HTTP 代理端口（仅本程序使用）
-  socks_port: 7891                   # 本地 SOCKS5 端口
-  api_port: 9090                     # 外部控制 API 端口
   api_secret: "zlib-local"           # API secret
   work_dir: "data/mihomo_run"        # 运行目录（放 config.yaml 等）
   # 节点存活测速目标。故意不用 z-library 本身：z-library 会先返回 503浏览器校验页、
@@ -28,8 +25,15 @@ mihomo:
   # 判断并自动轮换节点。
   test_url: "http://www.gstatic.com/generate_204"
   test_timeout_ms: 5000              # 单节点测速超时
-  dns_port: 1053                     # mihomo 内置 DNS 端口（仅本机，fake-ip 防 DNS 投毒）
   subscription_cache_hours: 24       # 订阅缓存有效期（小时），过期或全部节点不可用才重新拉取
+  # 本地端口（HTTP/SOCKS/控制API/DNS）不填就好：程序会自动从内置的一组不常见端口里
+  # 挑选当前空闲的一个使用，专门避开默认端口 7890/7891/9090——因为你的机器上很可能
+  # 已经在跑另一个 mihomo/clash占着这些默认端口，硬抢会导致启动失败或互相干扰。
+  # 只有你有特殊需求（比如要给其它程序固定端口对接）时才需要手动指定，取消注释：
+  # http_port: 17890
+  # socks_port: 17891
+  # api_port: 17892
+  # dns_port: 17893
 
 # 官网查找（低优）
 site_finder:

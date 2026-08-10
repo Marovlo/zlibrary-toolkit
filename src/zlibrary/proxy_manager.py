@@ -18,6 +18,7 @@ import platform
 import re
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import time
@@ -50,6 +51,37 @@ def _mihomo_arch() -> str:
     return m
 
 
+# 本地端口候选（写死，故意用不常见的高位端口）。别人机器上很可能已经跑着另一个
+# mihomo/clash 占用了默认端口 7890/7891/9090，这里全部避开默认值，四类端口互不重叠，
+# 每类给5 个候选逐个探测空闲，几乎不可能全部撞车。用户仍可在 config.yaml 里显式指定
+# 端口（会作为第一候选优先尝试），留空则完全走这套自动挑选。
+_HTTP_PORT_CANDIDATES = [17890, 27890, 37890, 47890, 57890]
+_SOCKS_PORT_CANDIDATES = [17891, 27891, 37891, 47891, 57891]
+_API_PORT_CANDIDATES = [17892, 27892, 37892, 47892, 57892]
+_DNS_PORT_CANDIDATES = [17893, 27893, 37893, 47893, 57893]
+
+
+def _port_free(port: int, also_udp: bool = False) -> bool:
+    """探测本机127.0.0.1:port 当前是否空闲（TCP，dns 端口再多探一次 UDP）。
+
+    用bind() 而非 connect()：connect 失败只能证明"没有服务在监听"，但 bind 才能
+    证明"我们自己能占住这个端口"——两者的差别在多用户/权限受限环境下会体现出来。
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("127.0.0.1", port))
+    except OSError:
+        return False
+    if also_udp:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
 @dataclass
 class NodeTestResult:
     name: str
@@ -75,6 +107,55 @@ class ProxyManager:
         self._proc: subprocess.Popen | None = None
         self.nodes: list[ProxyNode] = []
         self._rotated: set[str] = set()  # 本次会话已轮换过的节点，避免来回换同一批
+        self._load_persisted_ports()  # 让status/stop 等不经过 start() 的命令也能用对端口
+
+    # ---------- 0. 端口选择（避免跟用户机器上已有的 mihomo/clash 冲突） ----------
+
+    def _load_persisted_ports(self) -> None:
+        """把上次持久化选中的端口读回 mcfg（只读取，不做空闲探测）。
+
+        这样 `zlib status` / `zlib stop` 等不经过 `start()` 的命令，也能知道去哪个
+        端口找已经在跑的 mihomo 实例，而不是每次都用 config.yaml 里的默认值（现在
+        默认是 None）去问一个根本不对的端口，误判成"未运行"。真正的空闲探测/重新
+        挑选只在 `start()` 内调用 `ensure_ports()` 时发生。
+        """
+        ports = self._load_state().get("ports") or {}
+        for key in ("http", "socks", "api", "dns"):
+            val = ports.get(key)
+            if val:
+                setattr(self.mcfg, f"{key}_port", val)
+
+    def ensure_ports(self) -> None:
+        """解析4类本地端口（http/socks/api/dns），写回 mcfg 并持久化。
+
+        每类端口的候选顺序：用户在 config.yaml 里显式配置的值（若有）→ 上次持久化选中
+        的值（若还空闲，尽量保持跨重启端口不变）→ 内置的一组不常见端口逐个探测。
+        只在确认不再运行（`start()` 里 `is_running()` 为 False 之后）才调用，避免把
+        我们自己已经占用的端口误判成"被占用需要换"。
+        """
+        self.mcfg.http_port = self._resolve_port("http", self.mcfg.http_port, _HTTP_PORT_CANDIDATES)
+        self.mcfg.socks_port = self._resolve_port("socks", self.mcfg.socks_port, _SOCKS_PORT_CANDIDATES)
+        self.mcfg.api_port = self._resolve_port("api", self.mcfg.api_port, _API_PORT_CANDIDATES)
+        self.mcfg.dns_port = self._resolve_port("dns", self.mcfg.dns_port, _DNS_PORT_CANDIDATES, also_udp=True)
+        log.info("本地端口: http=%s socks=%s api=%s dns=%s",
+                 self.mcfg.http_port, self.mcfg.socks_port, self.mcfg.api_port, self.mcfg.dns_port)
+        self._save_state({"ports": {
+            "http": self.mcfg.http_port, "socks": self.mcfg.socks_port,
+            "api": self.mcfg.api_port, "dns": self.mcfg.dns_port,
+        }})
+
+    @staticmethod
+    def _resolve_port(kind: str, current: int | None, candidates: list[int], also_udp: bool = False) -> int:
+        tried: list[int] = []
+        ordered = ([current] if current else []) + [c for c in candidates if c != current]
+        for port in ordered:
+            tried.append(port)
+            if _port_free(port, also_udp=also_udp):
+                return port
+        raise RuntimeError(
+            f"没有可用的 {kind} 端口：尝试过 {tried} 均被占用。"
+            f"请检查是否有其它程序占用了这些端口，或在 config.yaml 的 mihomo.{kind}_port 手动指定一个空闲端口。"
+        )
 
     # ---------- 1. 下载二进制 ----------
 
@@ -307,11 +388,15 @@ class ProxyManager:
 
     def start(self) -> None:
         if self.is_running():
-            log.debug("mihomo 已在运行")
+            log.debug("mihomo 已在运行 (http=%s socks=%s api=%s)",
+                      self.mcfg.http_port, self.mcfg.socks_port, self.mcfg.api_port)
             return
+        self.ensure_ports()
         self.ensure_binary()
-        if not self.run_config.exists():
-            self.generate_config()
+        # 用刚解析出的端口重新生成配置：不能只在文件不存在时才生成，否则端口从上次
+        # 运行后发生变化（比如被别的程序占用改选了新端口）时，会启动一个绑定着
+        # 陈旧端口配置的 mihomo，跟 mcfg 里的新端口不一致。
+        self.generate_config()
         log.info("启动 mihomo ...")
         log_file = open(self.work_dir / "mihomo.log", "ab")
         self._proc = subprocess.Popen(
@@ -514,17 +599,24 @@ class ProxyManager:
         except Exception:  # noqa: BLE001
             return {}
 
-    def _save_state(self, state: dict) -> None:
+    def _save_state(self, patch: dict) -> None:
+        """把 `patch` 合并进 state.json 并整体写回（浅合并，同 key 覆盖）。
+
+        必须是合并而非整体覆盖：`ensure_ports()` 存的`ports` 字段和
+        `rotate_node()`/`select_best()` 存的 `node` 字段是两个独立调用方各自维护的，
+        谁后调用都不该把对方刚存的字段抹掉。
+        """
         import json
 
+        state = self._load_state()
+        state.update(patch)
         self._state_file().write_text(json.dumps(state), encoding="utf-8")
 
     # ---------- 一键编排 ----------
 
     def setup_and_select_best(self) -> NodeTestResult | None:
-        """完整流程：准备订阅→生成配置→启动→（优先复用上次节点，不通才全量测速选优）。"""
+        """完整流程：准备订阅→启动（内部会解析端口+生成配置）→（优先复用上次节点，不通才全量测速选优）。"""
         self.prepare_subscription()
-        self.generate_config()
         self.start()
 
         last_name = self._load_state().get("node")
@@ -541,9 +633,8 @@ class ProxyManager:
         if best is None:
             log.warning("所有节点均不可达，强制刷新订阅后重试一次")
             self.prepare_subscription(force=True)
-            self.generate_config()
             self.stop()
-            self.start()
+            self.start()  # 内部会用刷新后的订阅重新生成配置
             results = self.test_all_nodes()
             best = self.select_best(results)
         if best:
