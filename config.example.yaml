@@ -1,0 +1,45 @@
+# Z-Library 工具主配置模板
+# 使用方法：cp config.example.yaml config.yaml，再把下面的订阅链接换成你自己的。
+# config.yaml 已加入 .gitignore，不会被提交到仓库。
+
+# 订阅链接（clash 格式，含ss/vmess/trojan 等混合协议）。换成你自己的订阅地址/token。
+subscription_url: "https://your-subscription-provider.example.com/api/v1/client/subscribe?token=YOUR_TOKEN"
+
+# 默认官网（当前已知；如失效会触发 site_finder）
+default_site: "https://zh.z-library.sk"
+
+# 下载目录
+download_dir: "~/Downloads/zlibrary"
+
+# 格式偏好（按优先级，搜索结果含多格式时按此选）
+format_preference: ["epub", "pdf", "mobi", "azw3"]
+
+# mihomo 配置
+mihomo:
+  binary_path: "data/mihomo"        # 二进制相对路径（首次运行会自动从vendor/ 解压出来，无需手动下载）
+  http_port: 7890                    # 本地 HTTP 代理端口（仅本程序使用）
+  socks_port: 7891                   # 本地 SOCKS5 端口
+  api_port: 9090                     # 外部控制 API 端口
+  api_secret: "zlib-local"           # API secret
+  work_dir: "data/mihomo_run"        # 运行目录（放 config.yaml 等）
+  # 节点存活测速目标。故意不用 z-library 本身：z-library 会先返回 503浏览器校验页、
+  # 且响应偏慢，用它测速会把大量其实可用的节点误判为不可达（实测 20 个存活节点被判0 个可达）。
+  # 这里只用一个轻量端点判断"节点通不通"，能否访问 z-library 由客户端在真实请求时
+  # 判断并自动轮换节点。
+  test_url: "http://www.gstatic.com/generate_204"
+  test_timeout_ms: 5000              # 单节点测速超时
+  dns_port: 1053                     # mihomo 内置 DNS 端口（仅本机，fake-ip 防 DNS 投毒）
+  subscription_cache_hours: 24       # 订阅缓存有效期（小时），过期或全部节点不可用才重新拉取
+
+# 官网查找（低优）
+site_finder:
+  enabled: true
+  cache_file: "data/known_sites.json"
+  search_engine: "bing"             # bing | duckduckgo
+
+# 访问策略
+access:
+  user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+  httpx_timeout: 30
+  playwright_timeout: 60
+  max_retries: 2

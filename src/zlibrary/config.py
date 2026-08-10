@@ -1,0 +1,104 @@
+"""配置加载。从 config.yaml 读取，路径相对于项目根解析。"""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+def project_root() -> Path:
+    # src/zlib/config.py -> 上溯两级到项目根
+    return Path(__file__).resolve().parents[2]
+
+
+@dataclass
+class MihomoConfig:
+    binary_path: str
+    http_port: int
+    socks_port: int
+    api_port: int
+    api_secret: str
+    work_dir: str
+    test_url: str
+    test_timeout_ms: int
+    subscription_cache_hours: float = 24
+    dns_port: int = 1053  # mihomo 内置 DNS 监听端口（仅本机，用于 fake-ip 防投毒）
+
+    def binary_abs(self) -> Path:
+        p = Path(self.binary_path)
+        return p if p.is_absolute() else project_root() / p
+
+    def work_dir_abs(self) -> Path:
+        p = Path(self.work_dir)
+        return p if p.is_absolute() else project_root() / p
+
+
+@dataclass
+class SiteFinderConfig:
+    enabled: bool
+    cache_file: str
+    search_engine: str
+
+
+@dataclass
+class AccessConfig:
+    user_agent: str
+    httpx_timeout: int
+    playwright_timeout: int
+    max_retries: int
+
+
+@dataclass
+class Config:
+    subscription_url: str
+    default_site: str
+    download_dir: str
+    format_preference: list[str]
+    mihomo: MihomoConfig
+    site_finder: SiteFinderConfig
+    access: AccessConfig
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    def download_dir_abs(self) -> Path:
+        d = Path(self.download_dir).expanduser()
+        return d
+
+    @classmethod
+    def load(cls, path: str | Path | None = None) -> "Config":
+        p = Path(path) if path else project_root() / "config.yaml"
+        with open(p, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        m = data["mihomo"]
+        return cls(
+            subscription_url=data["subscription_url"],
+            default_site=data["default_site"],
+            download_dir=data["download_dir"],
+            format_preference=data.get("format_preference", ["epub", "pdf"]),
+            mihomo=MihomoConfig(
+                binary_path=m["binary_path"],
+                http_port=m["http_port"],
+                socks_port=m["socks_port"],
+                api_port=m["api_port"],
+                api_secret=m["api_secret"],
+                work_dir=m["work_dir"],
+                test_url=m["test_url"],
+                test_timeout_ms=m["test_timeout_ms"],
+                subscription_cache_hours=m.get("subscription_cache_hours", 24),
+                dns_port=m.get("dns_port", 1053),
+            ),
+            site_finder=SiteFinderConfig(
+                enabled=data["site_finder"]["enabled"],
+                cache_file=data["site_finder"]["cache_file"],
+                search_engine=data["site_finder"]["search_engine"],
+            ),
+            access=AccessConfig(
+                user_agent=data["access"]["user_agent"],
+                httpx_timeout=data["access"]["httpx_timeout"],
+                playwright_timeout=data["access"]["playwright_timeout"],
+                max_retries=data["access"]["max_retries"],
+            ),
+            raw=data,
+        )

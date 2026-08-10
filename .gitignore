@@ -1,0 +1,23 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# --- 运行期数据（含账号密码、登录 cookie、订阅节点等敏感信息，不应提交） ---
+data/
+accounts.yaml
+config.yaml
+clash-config.yaml
+
+# --- 系统/编辑器 ---
+.DS_Store
+*.log
+
+# --- 说明 ---
+# vendor/ 需要提交（随包自带的 mihomo 二进制，用于解决"先鸡先蛋"的联网引导问题）
+# config.example.yaml / accounts.example.yaml 需要提交（不含真实密钥的模板）

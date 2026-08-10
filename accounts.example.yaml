@@ -1,0 +1,7 @@
+# 账号池模板。使用方法：
+#   1) cp accounts.example.yaml accounts.yaml
+#   2) 手动填入 email/password，或者更推荐直接用命令添加（会先做真实登录测试，成功才写入）：
+#      zlib add-account <email> [password]
+#
+# accounts.yaml 已加入 .gitignore（含真实密码，不会被提交到仓库）。
+accounts: []
