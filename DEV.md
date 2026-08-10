@@ -569,3 +569,47 @@ unavailable"。这是**站点后端的间歇性故障**，跟具体某本书、�
 三种场景都不误判）；线上复现时端到端实测，从登录完成到给出准确诊断只用了 6 秒
 （而不是死等 60~90 秒后才含糊报"未找到"）。
 
+## 十五、2026-08-10 打包分发：解决"先鸡先蛋"、清理敏感信息、补齐安装脚本
+
+用户要把工具打包给别人用，提出一个关键问题：**mihomo 的下载本身有"先鸡先蛋"问题**——
+国内大部分网络正是因为连不上 GitHub 才需要这个代理工具，但装好代理之前又恰恰连不上
+GitHub 去下载 mihomo。用户的方案：随包自带一份 mihomo，装好后用它连订阅起代理，
+再用这条已经打通的代理线路去 GitHub 升级到最新版。这个方案是合理的，照此实现：
+
+### mihomo 引导链路重构（`proxy_manager.py`）
+- `ensure_binary()` 现在优先找`vendor/mihomo-linux-{arch}.gz`（随包自带），本地解压，
+  **全程不联网**；只有当前架构没有预置包时才回退联网下载（GitHub + 两个镜像，原有逻辑）。
+- 新增 `upgrade_binary(proxy_url)`：经**已经验证过能访问 Z-Library 的代理线路**去连
+  GitHub 检查/下载最新版本，替换二进制后自动重启 mihomo 进程。这条线路大概率也能到
+  GitHub，不依赖用户网络本身能直连——即"先用旧版本把代理跑起来，再用这条代理换新版本"。
+- 新增 CLI 命令 `zlib upgrade-mihomo`；`zlib status` 增加显示当前 mihomo 版本
+  （`binary_version()`，解析 `mihomo -v` 输出）。
+- 架构判断 `_mihomo_arch()`：`x86_64→amd64`、`aarch64→arm64`，跟mihomo release 资产
+  命名对齐（原来硬编码 `amd64`，现在用检测到的架构，为后续加更多架构预置包留了口子）。
+
+验证：临时删除本地 `data/mihomo`，调用 `ensure_binary()`，确认**完全不触网**、仅用
+`vendor/mihomo-linux-amd64.gz`恢复出与原文件字节级一致（sha256 相同）的可执行文件，
+`binary_version()` 正确解析出 `v1.19.29`；另在一个完全独立的临时目录（rsync 排除
+`.venv`/`data`/真实配置，模拟"刚 clone 下来"的状态）跑通 `install.sh` 全流程（建虚拟环境
+→ 装依赖 → 装playwright chromium → 生成配置模板），并验证 `ensure_binary()` 在新路径下
+同样能找到 `vendor/` 正确引导，证明路径解析（`project_root()`）在不同工作目录下都正确。
+
+### 敏感信息清理（打包为公开仓库前必须做）
+`accounts.yaml`（真实邮箱+密码）、`config.yaml`（真实订阅token）、`clash-config.yaml`
+（解析后的真实节点列表，等价于泄露订阅内容）、`data/`（真实登录 cookie、运行期缓存）
+一律加入 `.gitignore`，不提交。改为提供 `config.example.yaml`/`accounts.example.yaml`
+模板，`install.sh` 首次运行时自动从模板复制生成。`DEV.md` 里此前记录调试过程时明文写入
+的真实邮箱、QQ号、密码全部替换为占位符（内容/结论不受影响，只脱敏）。
+
+### 新增 `install.sh`
+职责边界很清楚：只管Python 环境（建venv、装依赖、装 playwright chromium 可选失败不阻塞）
+和配置模板生成，**不管mihomo**——mihomo 的随包引导是程序自己的逻辑（`ensure_binary()`），
+不需要装的时候单独处理，用户第一次跑 `zlib` 命令时自动透明完成。
+
+### 目录整理
+- 根目录里散落的 `mihomo-linux-amd64-v1.19.29.gz`移入 `vendor/mihomo-linux-amd64.gz`
+  （去掉文件名里的版本号，版本单独记在 `vendor/MIHOMO_VERSION`，避免每次升级预置包都要
+  改代码里的文件名匹配逻辑）。
+- `data/mock_sub.yaml`（测试用假订阅fixture，非真实节点）移到 `tests/fixtures/`，
+  这样 `data/` 可以完整地整体 gitignore，不用为了保留这一个无害文件单独开洞。
+- 清掉 `src/zlib.egg-info/`、`__pycache__/`（构建产物，`pip install -e .` 会自动重新生成）。
