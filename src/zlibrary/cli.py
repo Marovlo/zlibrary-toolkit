@@ -2,27 +2,32 @@
 
 全链路：
 1. 检测直连 → 不通则起mihomo（后台常驻，跨进程复用，不会每次重新起）选最优代理
-2. 复用本地保存的登录态；失效才重新选账号登录，成功后保存登录态
-3. 搜索（一次拿全信息）
-4. 完全匹配→自动下载最高评分；否则列出供选择
+2. 下载账号策略：accounts.yaml 里有today额度未用尽的账号 → 优先登录用账号下载
+   （体验更稳）；没配置账号或账号额度都用尽 → 自动回退匿名下载（不消耗账号额度，
+   但受站点按出口IP计算的每日限额限制，撞到限额会自动换代理节点重试）。
+3. 默认列出候选（含年份/大小/评分等参考信息）供用户手动选择；加 `-y` 才自动
+   下载排序最优的那个候选，不再询问。
+
+详细说明见 `zlib help`。
 
 后台持久化说明：
-- mihomo 代理进程用 `start_new_session=True` 启动，不依附于当前 CLI 进程，退出后仍在后台运行；
+- mihomo代理进程用 `start_new_session=True` 启动，不依附于当前 CLI 进程，退出后仍在后台运行；
   下次调用会通过 API 健康检查探测到已在运行，直接复用，不会重复启动/测速。
-- 登录态 cookie 存到 data/session.json，下次调用先做一次轻量校验（GET /profile），
+- 登录态cookie 存到 data/session.json，下次调用先做一次轻量校验（GET /profile），
   仍有效则直接复用，无需重新走账号轮换登录；失效才自动重新登录并刷新保存的登录态。
 - `zlib stop` 可手动停止后台代理；`zlib status` 查看当前状态。
 """
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import time
 from pathlib import Path
 
 import click
 
-from .client import SearchServiceUnavailable, SiteRejected
+from .client import IpQuotaExceeded, SearchServiceUnavailable, SiteRejected
 from .config import Config, project_root
 from .site_checker import check_direct, check_via_proxy
 
@@ -102,16 +107,42 @@ def _make_client(cfg: Config, site: str, proxy_url, pm):
     )
 
 
-def _load_accounts(cfg: Config):
+def _load_accounts_optional(cfg: Config):
+    """尝试加载账号池；文件不存在或未配置任何账号时返回 `None`——这不是错误，
+    表示"当前无账号可用"，调用方（search/download）据此自动回退匿名模式。"""
     from .accounts import AccountStore, DEFAULT_DAILY_LIMIT
 
     path = project_root() / "accounts.yaml"
     store = AccountStore.load(path, limit=DEFAULT_DAILY_LIMIT)
-    if not store.accounts:
-        raise click.ClickException(
-            "accounts.yaml 无账号，请先填写（至少一个 email/password）"
-        )
-    return store
+    return store if store.accounts else None
+
+
+def _prepare_account(cfg: Config, client, force_anonymous: bool = False):
+    """决定并（如需要）执行本次调用的登录策略：**优先账号，无账号才匿名**。
+
+    返回 `(acc, store)`：
+    - accounts.yaml 里有今日额度未用尽的账号，且未指定 `--anonymous` → 登录并
+      返回 `(acc, store)`，之后的搜索/下载都会带着登录态（体验更稳）。
+    - 未配置账号、或全部账号今日额度都已用尽、或显式 `--anonymous` → 返回
+      `(None, None)`，调用方走匿名流程（不登录，不消耗账号额度）。
+
+    注意：若账号存在但登录本身失败（密码错误/网络问题等），会直接抛
+    `ClickException` 终止命令，**不会**静默回退匿名——账号配置有问题需要用户
+    知道并处理，不应该被隐藏掉。
+    """
+    if force_anonymous:
+        log.info("已指定 --anonymous，强制匿名模式")
+        return None, None
+    store = _load_accounts_optional(cfg)
+    if store is None:
+        log.info("未配置账号（accounts.yaml 不存在或为空），使用匿名模式")
+        return None, None
+    if not store.next_available():
+        log.info("accounts.yaml 中账号今日下载额度均已用尽，回退匿名模式下载")
+        return None, None
+    acc = _login(client, store)
+    log.info("✓ 使用账号 %s 登录，优先账号下载", acc.email)
+    return acc, store
 
 
 def _login(client, store):
@@ -204,14 +235,14 @@ def _search_with_status(client, query: str, page: int = 1):
 @cli.command()
 @click.argument("query")
 @click.option("-p", "--page", default=1, help="页码")
-def search(query: str, page: int) -> None:
+@click.option("--anonymous", "force_anonymous", is_flag=True, help="强制匿名搜索，即使配置了账号也不登录")
+def search(query: str, page: int, force_anonymous: bool) -> None:
     """搜索书籍。"""
     cfg = Config.load()
     site, proxy_url, pm = _ensure_access(cfg)
-    store = _load_accounts(cfg)
     client = _make_client(cfg, site, proxy_url, pm)
     try:
-        _login(client, store)
+        _prepare_account(cfg, client, force_anonymous)
         results = _search_with_status(client, query, page=page)
         if not results:
             click.echo("未找到相关书籍")
@@ -224,31 +255,34 @@ def search(query: str, page: int) -> None:
 
 @cli.command()
 @click.argument("query")
-@click.option("--yes", "-y", is_flag=True, help="完全匹配时自动下载，无需确认")
-@click.option("--limit", default=10, help="显示候选数量")
-def download(query: str, yes: bool, limit: int) -> None:
-    """搜索并下载书籍。完全匹配自动下载评分最高；否则交互选择。"""
+@click.option("--yes", "-y", is_flag=True, help="自动下载排序最优的候选，不进入交互选择列表")
+@click.option("--limit", default=10, help="交互列表显示候选数量")
+@click.option("--anonymous", "force_anonymous", is_flag=True, help="强制匿名下载，即使配置了账号也不登录")
+def download(query: str, yes: bool, limit: int, force_anonymous: bool) -> None:
+    """搜索并下载书籍。默认列出候选（含年份/大小/评分）供手动选择；加-y 才自动
+    下载排序最优的那个候选，不再询问。详细账号/IP限额策略见 zlib help。
+    """
     cfg = Config.load()
     site, proxy_url, pm = _ensure_access(cfg)
-    store = _load_accounts(cfg)
     client = _make_client(cfg, site, proxy_url, pm)
     try:
-        acc = _login(client, store)
+        acc, store = _prepare_account(cfg, client, force_anonymous)
         results = _search_with_status(client, query)
         if not results:
             click.echo("未找到相关书籍")
             return
 
-        # 完全匹配？
-        exact = [b for b in results if b.match_score(query) == 100]
-        if exact:
-            best_book = max(exact, key=lambda b: b.rating)
-            click.echo(f"✓ 完全匹配: 《{best_book.title}》- {best_book.author} 评分 {best_book.rating}")
-            if yes or click.confirm("下载这本？", default=True):
-                _do_download(client, store, acc, _rank_candidates(results, query, cfg), cfg)
+        candidates = _rank_candidates(results, query, cfg)
+        if not candidates:
+            click.echo("搜到结果但均缺少下载链接，无法下载")
             return
 
-        # 不完全匹配：列出供选择
+        if yes:
+            _echo_auto_pick(candidates[0], query)
+            _do_download(client, pm, acc, store, candidates, cfg)
+            return
+
+        # 默认：列出候选让用户自己选，不自动下载
         _display_results(results[:limit], query)
         choice = click.prompt("输入序号下载（回车跳过）", default="", show_default=False)
         if not choice.strip():
@@ -264,11 +298,25 @@ def download(query: str, yes: bool, limit: int) -> None:
             return
         book = results[:limit][idx]
         # 用户明确选了某一条，就以它为首选，其余同名候选作为失效兜底
-        others = [b for b in _rank_candidates(results, query, cfg) if b is not book]
-        _do_download(client, store, acc, [book] + others, cfg)
+        others = [b for b in candidates if b is not book]
+        _do_download(client, pm, acc, store, [book] + others, cfg)
     finally:
         client.close()
         # 注意：代理进程（mihomo）后台常驻，不在这里 stop，跨次调用复用。用 `zlib stop` 手动停止。
+
+
+def _echo_auto_pick(book, query: str) -> None:
+    score = book.match_score(query)
+    if score == 100:
+        tag = "完全匹配"
+    elif score >= 90:
+        tag = "前缀匹配"
+    elif score >= 50:
+        tag = "近似匹配"
+    else:
+        tag = "标题匹配度低，请确认是否是你要的书"
+    click.echo(f"自动选择（{tag}）：《{book.title}》- {book.author} "
+               f"({book.year} {(book.format or '?').upper()} {book.size}) 评分 {book.rating}")
 
 
 def _rank_candidates(results, query: str, cfg: Config, max_candidates: int = 6) -> list:
@@ -276,12 +324,15 @@ def _rank_candidates(results, query: str, cfg: Config, max_candidates: int = 6) 
 
     为什么需要候选列表而不是只挑一本：同一本书在 z-library 上往往有多条记录（不同
     上传者/版本/文件），**其中一部分记录的文件已经失效**——站点对这些记录的 `/dl/`
-    直接返回 `204 No Content`。实测搜索"DK魔法百科"返回 2 条：标题完全匹配的那条
-    (6.24MB) 是死记录，返回204；而标题只算近似匹配的另一条 (47.98MB) 能正常下载。
-    原实现只取"完全匹配里评分最高"的那一条，正好总是命中死记录，于是这本书永远下不了
-    ——这才是"有些书能下、有些书不能下"的主因（跟节点/IP/浏览器指纹都无关）。
+    直接返回 `204 No Content`。实测搜索"DK魔法百科"多次都会返回一条标题**完全等于**
+    查询词、作者/年份明显是垃圾数据的死记录（返回204），而真正能下的那条标题带着
+    一堆副标题/丛书信息后缀，只能算"前缀匹配"。原实现只取"完全匹配里评分最高"的
+    那一条，正好总是命中死记录；现在候选队列覆盖完全匹配+前缀匹配+普通包含匹配的
+    全部结果，某条被拒会自动换下一条，不会再卡死在同一条记录上。
 
-    排序：先按标题匹配度，再按格式偏好，最后按评分。
+    排序：先按标题匹配度（完全100 > 前缀90 > 包含50），再按格式偏好，最后按评分——
+    **不看文件大小**（评分代表下载过的人打的分，比大小更能反映内容质量，大小已在
+    DEV.md 第十七节讨论过，明确不纳入排序）。
     """
     pref = [f.lower() for f in cfg.format_preference]
 
@@ -296,25 +347,27 @@ def _rank_candidates(results, query: str, cfg: Config, max_candidates: int = 6) 
     return sorted([b for b in results if b.download_url or b.detail_url], key=key)[:max_candidates]
 
 
-def _do_download(client, store, acc, candidates, cfg: Config) -> None:
+def _do_download(client, pm, acc, store, candidates, cfg: Config) -> None:
     """按候选顺序逐条尝试下载，第一条成功即返回。
 
     两个要点：
-    1. **只在真正下载成功时才计账号额度。** 此前实现在失败分支也调用`mark_used()`
-       （理由是"防死循环"），但重试本来就有上限，不需要靠烧额度兜底——一次调试就能
-       白扣掉好几次额度。
-    2. **某条记录被站点拒绝（204）时换下一条候选记录，而不是换账号。** 这类拒绝是
-       "这个文件没了"，跟账号无关，换账号只是白烧额度。
+    1. 只在真正下载成功、且本次调用一开始就决定使用登录账号时才计账号额度
+       （`acc` 由 `_prepare_account` 提前决定，贯穿本次调用始终不变）；匿名
+       下载成功不消耗任何账号额度。
+    2. 某条记录被站点拒绝（204）时换下一条候选记录，而不是换账号/换节点——
+       这类拒绝是"这个文件没了"，跟账号、出口IP都无关。匿名模式下若撞到
+       "出口IP每日限额用完"（`IpQuotaExceeded`），处理逻辑在 `_download_one`
+       里（自动换节点重试）。
     """
     if not isinstance(candidates, list):
         candidates = [candidates]
     errors: list[str] = []
     for idx, book in enumerate(candidates, 1):
         if idx > 1:
-            click.echo(f"→ 换下一个候选版本重试: 《{book.title[:40]}》"
+            click.echo(f"→ 换下一个候选版本重试:《{book.title[:40]}》"
                        f"（{(book.format or '?').upper()} {book.size}）")
         try:
-            path = client.download(book, cfg.download_dir_abs(), cfg.format_preference)
+            path = _download_one(client, pm, book, cfg, acc)
         except SiteRejected as e:
             log.warning("候选 %d 被站点拒绝（该记录的文件已失效）: %s", idx, e)
             errors.append(f"候选{idx}《{book.title[:24]}》: {e}")
@@ -323,8 +376,9 @@ def _do_download(client, store, acc, candidates, cfg: Config) -> None:
             log.error("候选 %d 下载失败: %s", idx, e)
             errors.append(f"候选{idx}《{book.title[:24]}》: {e}")
             continue
-        store.mark_used(acc)
-        click.echo(f"✓ 下载完成: {path}")
+        if acc:
+            store.mark_used(acc)
+        click.echo(f"下载完成: {path}" + ("" if acc else "（匿名下载，未消耗账号额度）"))
         return
 
     detail = "\n  ".join(errors)
@@ -333,6 +387,33 @@ def _do_download(client, store, acc, candidates, cfg: Config) -> None:
         "客户端已自动解过站点浏览器校验、并轮换过出口节点与后端。若全部候选都是 204，"
         "说明这些记录的文件在站点侧已失效/下架，换账号或换节点都无效。"
     )
+
+
+def _download_one(client, pm, book, cfg: Config, acc):
+    """下载单本书。匿名模式（acc为None）下若撞到出口IP每日限额已用完，
+    自动换节点重试；换完全部可用节点仍不行才报错。登录模式下理论上不会触发
+    IpQuotaExceeded（该限额只按匿名请求计），若真的触发，大概率是该账号
+    自身的下载额度在站点侧也已用尽。
+    """
+    while True:
+        try:
+            return client.download(book, cfg.download_dir_abs(), cfg.format_preference)
+        except IpQuotaExceeded as e:
+            log.warning("当前出口IP匿名下载额度已用完（IP: %s）", e.ip or "未知")
+            if not pm:
+                extra = "（当前已登录账号，可能是该账号在站点侧的下载额度也已用尽）" if acc else ""
+                raise click.ClickException(
+                    f"当前直连访问（无代理可切换），匿名下载额度已用完，无法继续。{extra}"
+                ) from e
+            nxt = pm.rotate_node()
+            if not nxt:
+                hint = ("该账号在站点侧的下载额度可能也已用尽，建议换个账号或明天再试"
+                        if acc else "请添加账号（zlib add-account）后重试")
+                raise click.ClickException(
+                    f"已尝试全部可用出口节点，匿名下载额度均已用完。{hint}"
+                ) from e
+            log.info("换出口节点重试 -> %s", nxt)
+            continue
 
 
 @cli.command("add-account")
@@ -362,6 +443,69 @@ def add_account(email: str, password: str | None) -> None:
     existed = store.by_email(email) is not None
     store.add_account(email, password, remaining=res.remaining)
     click.echo(f"✓ 账号 {email} 已{'更新' if existed else '添加'}到账号池（{path}）")
+
+
+def _write_config_value(path: Path, key: str, value: str) -> None:
+    """把config.yaml 顶层某个字符串字段替换成新值，只改这一行，保留其余内容
+    （注释、其它字段）不变。字段不存在则追加到文件末尾。"""
+    text = path.read_text(encoding="utf-8")
+    pattern = re.compile(rf'^{re.escape(key)}:\s*.*$', re.MULTILINE)
+    new_line = f'{key}: "{value}"'
+    if pattern.search(text):
+        text = pattern.sub(new_line, text, count=1)
+    else:
+        text = text.rstrip("\n") + f"\n{new_line}\n"
+    path.write_text(text, encoding="utf-8")
+
+
+@cli.command("set-subscription")
+@click.argument("url")
+def set_subscription(url: str) -> None:
+    """设置/更新 mihomo 代理订阅链接，并立即验证是否有效。
+
+    验证顺序：拉取订阅（校验是否是合法 clash 格式）→ 写入 config.yaml → 用新订阅
+    重启代理 → 测速全部节点 → 挑最优节点验证真的能访问 Z-Library。只要拉取/格式
+    校验失败就不会写入配置，避免把一个坏链接留下来覆盖原本能用的订阅。
+    """
+    import tempfile
+
+    from .subscription import fetch_subscription, parse_subscription
+
+    tmp_path = Path(tempfile.mktemp(suffix=".yaml"))
+    try:
+        fetch_subscription(url, tmp_path)
+        nodes = parse_subscription(tmp_path)
+    except Exception as e:  # noqa: BLE001
+        raise click.ClickException(f"订阅链接拉取/解析失败，未写入配置。原因: {e}") from e
+    finally:
+        tmp_path.unlink(missing_ok=True)
+    if not nodes:
+        raise click.ClickException("订阅拉取成功但解析出 0 个节点，未写入配置（可能不是有效的 clash 订阅）")
+    click.echo(f"✓ 订阅格式有效，解析出 {len(nodes)} 个节点")
+
+    config_path = project_root() / "config.yaml"
+    _write_config_value(config_path, "subscription_url", url)
+    click.echo(f"✓ 已写入 {config_path}")
+
+    cfg = Config.load()  # 重新加载，读到刚写入的新subscription_url
+    from .proxy_manager import ProxyManager
+
+    pm = ProxyManager(cfg)
+    if pm.is_running():
+        pm.stop()
+    pm.prepare_subscription(force=True)
+    pm.start()
+    click.echo("正在测速全部节点...")
+    results = pm.test_all_nodes()
+    ok = [r for r in results if r.ok]
+    click.echo(f"节点可达: {len(ok)}/{len(results)}")
+    if not ok:
+        raise click.ClickException("订阅已保存，但全部节点测速均不可达，请检查订阅是否已过期/欠费/被限速")
+    best = pm.select_best(results)
+    click.echo(f"✓ 最快节点: {best.name} ({best.delay_ms}ms)")
+    click.echo("验证节点能否访问 Z-Library...")
+    _ensure_site_reachable(pm, cfg.default_site)
+    click.echo("✓ 订阅设置完成且已验证可用")
 
 
 @cli.command()
@@ -439,6 +583,69 @@ def logout() -> None:
         click.echo("没有已保存的登录态")
 
 
+@cli.command()
+def help() -> None:  # noqa: A001 - 故意用 help 这个名字，符合用户对`zlib help` 的直觉
+    """显示详细使用说明（命令列表、账号策略、IP限额说明）。"""
+    click.echo(_HELP_TEXT)
+
+
+_HELP_TEXT = """
+Z-Library 一键搜索下载工具 - 详细说明
+========================================
+
+命令列表
+--------
+  zlib search <书名>                搜索书籍
+  zlib download <书名>              搜索并列出候选下载列表，手动选择序号下载
+  zlib download <书名> -y           自动下载排序最优的候选，不进入交互选择
+  zlib add-account <邮箱> [密码]     添加/更新账号（先真实登录测试，成功才写入 accounts.yaml）
+  zlib set-subscription <链接>      设置/更新代理订阅链接，并立即验证是否有效
+  zlib status                       查看代理/登录态状态
+  zlib upgrade-mihomo                升级本地 mihomo 代理内核到最新版
+  zlib stop                          停止后台常驻的代理进程
+  zlib logout                        清除本地保存的登录态
+  全局选项 -v/--verbose 放在 zlib 之后可看详细日志，如 zlib -v download 三体
+
+账号下载策略（优先账号，回退匿名）
+--------------------------------
+  1. accounts.yaml 中存在今日下载额度未用尽的账号，优先登录用账号下载
+     （体验最稳定，不受下面的"出口IP每日限额"影响）。
+  2. 未配置账号，或全部账号额度都已用尽，自动回退匿名下载（不登录、不消耗
+     账号额度），但匿名下载受Z-Library 按出口 IP 计算的每日限额限制。
+  3. 用 --anonymous 可强制跳过账号，即使配置了账号也用匿名下载。
+
+出口IP每日限额说明
+------------------
+  Z-Library 对未登录的匿名请求，按下载方的出口 IP 统计每日下载次数，超额会
+  返回"每日限额已用完，请登录账号"的提示。本工具检测到这种情况会自动切换
+  代理节点（相当于换一个出口IP）重试；如果换完所有可用节点仍然超额，说明
+  这批代理节点的出口 IP 大概率是共享 IP、被其它用户占用了额度，此时只能：
+    - 添加一个账号（zlib add-account），账号下载不受IP限额影响；或
+    - 更换代理订阅（zlib set-subscription），换一批新的出口 IP。
+
+候选排序规则
+-----------
+  同一本书在站点上常有多条记录（不同上传者/版本），部分记录的文件已失效
+  （下载会被拒绝）。下载候选按以下优先级排序：
+    1. 标题匹配度：与书名完全一致 > 标题以书名开头 > 标题包含书名
+    2. 格式偏好（config.yaml 的 format_preference，如 epub 优先于 pdf）
+    3. 评分（不看文件大小 - 评分反映真实读者的下载后评价，比文件大小更能
+       代表内容质量；同名书优先下载评分高的那条）
+  若排在前面的候选被站点拒绝（文件失效），会自动换下一个候选重试。
+
+常见问题
+-------
+  Q: 为什么有的书能下载，有的提示额度已用完？
+  A: 见上面"出口IP每日限额说明"，跟你选的这本书无关。
+
+  Q: 下载总失败，报该记录文件已失效？
+  A: 这本书在站点侧的这条具体记录已下架，换个候选（如果有多个，会自动换）或过段时间再试。
+
+  Q: 怎么换代理订阅？
+  A: zlib set-subscription <新的clash订阅链接>，会自动验证格式和连通性。
+"""
+
+
 def _display_results(results, query: str) -> None:
     from rich.console import Console
     from rich.table import Table
@@ -454,7 +661,9 @@ def _display_results(results, query: str) -> None:
     table.add_column("评分", width=5)
     for i, b in enumerate(results, 1):
         score = b.match_score(query)
-        mark = " [green]★完全匹配[/]" if score == 100 else (" [yellow]~近似[/]" if score >= 50 else "")
+        mark = (" [green]★完全匹配[/]" if score == 100 else
+                " [cyan]≈前缀匹配[/]" if score >= 90 else
+                " [yellow]~近似[/]" if score >= 50 else "")
         table.add_row(
             str(i), b.title[:40] + mark, b.author[:20], b.year,
             (b.format or "").upper(), b.size, f"{b.rating:.1f}" if b.rating else "-",

@@ -74,9 +74,12 @@ fi
 
 echo
 info "安装完成！接下来："
-echo "  1. 编辑 config.yaml，填入你自己的订阅链接（subscription_url）"
-echo "  2. source .venv/bin/activate"
-echo "  3. zlib add-account <email> <password>   # 添加 Z-Library 账号"
-echo "  4. zlib download \"书名\"                  # 搜索并下载"
+echo "  0. source .venv/bin/activate   # 每次新开终端都需要先执行这一步"
+echo "  1. 设置代理订阅（二选一）："
+echo "     - zlib set-subscription \"<你的clash订阅链接>\"（会自动验证是否有效）"
+echo "     - 或手动编辑 config.yaml 的 subscription_url"
+echo "  2. zlib add-account <email> <password>   # 添加账号（可选，不加则匿名下载，受IP每日限额）"
+echo "  3. zlib download \"书名\"                  # 搜索并选择下载"
 echo
 echo "常用命令：zlib status / zlib stop / zlib logout / zlib upgrade-mihomo"
+echo "详细说明（账号策略、IP限额、候选排序规则等）：zlib help"

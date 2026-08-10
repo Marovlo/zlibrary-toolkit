@@ -33,6 +33,9 @@ log = logging.getLogger(__name__)
 
 CF_MARKERS = ("just a moment", "cf-challenge", "challenge-platform", "cf_chl_opt", "cf-ray", "_cf_chl")
 LOGIN_FAIL_MARKERS = ("incorrect", "invalid", "captcha", "verify you are human", "错误的电子邮箱", "密码错误", "验证码")
+# 匿名（未登录）下载超出出口IP每日限额时，站点返回的错误页面标记（CSS 类名，
+# 不受站点语言设置影响，比匹配"每日限额已用完"这类会被翻译的文案更稳）。
+IP_QUOTA_MARKER = "download-limits-error"
 
 # 每个请求最多解几次挑战。站点偶尔会连着发两次（换后端时各发一次），给点余量。
 MAX_CHALLENGE_ROUNDS = 3
@@ -58,7 +61,21 @@ class BookResult:
     raw_html: str = ""  # 原始卡片 HTML，调试用
 
     def match_score(self, query: str) -> int:
-        """完全匹配=100，忽略大小写与标点后相等=90，包含=50，否则 0。"""
+        """完全匹配=100；前缀匹配（一方是另一方的前缀）=90；包含（子串出现在
+        任意位置）=50；否则 0。
+
+        单独分出"前缀匹配"档是因为 z-library 同一本书常见"用户输入的书名 +
+        一堆后缀"的记录（如查询"dk魔法百科"，真实标题是"DK魔法百科（魔法、
+        巫術與神祕史…）A History of Magic…"）——**标题以查询词开头**，这种匹配
+        比"标题中间随便包含关键词"的弱匹配（如作者名、丛书名里恰好带了关键词）
+        可信得多，值得单独一档，让它在候选排序/自动确认时优先于纯子串匹配。
+
+        注意方向性：只认"标题以查询词开头"（`title.startswith(query)`），不认
+        反过来"查询词以标题开头"——后者（比如查询"三体2黑暗森林"、标题只是
+        "三体"）是标题比查询词还短、纯粹因为查询词凑巧带了这个短标题作前缀，
+        可信度和"标题中间包含关键词"差不多，不该被拔高到跟前缀匹配一样可信，
+        否则可能让一本明显不是用户想要的书被自动选中下载。
+        """
         def norm(s: str) -> str:
             return re.sub(r"[^\w\s]", "", s.lower()).strip()
         nq = norm(query)
@@ -67,6 +84,8 @@ class BookResult:
             return 0
         if nt == nq:
             return 100
+        if nt.startswith(nq):
+            return 90
         if nq in nt or nt in nq:
             return 50
         return 0
@@ -90,6 +109,24 @@ class _InvalidDownload(Exception):
 
 class SiteRejected(Exception):
     """站点应用层明确拒绝该资源（如 /dl/ 返回 204），换节点/后端可能有救。"""
+
+
+class IpQuotaExceeded(Exception):
+    """未登录（匿名）状态下，当前出口 IP 的每日匿名下载额度已用完。
+
+    实测：匿名（无任何 cookie）直接 GET `/dl/{code}` 时，若该出口 IP 当天匿名下载
+    次数已超限，站点返回 **HTTP 200 + 完整 HTML 页面**（不是 204、不是 503挑战页），
+    页面主体是`<section class="download-limits-error">`，标题"每日限额已用完"，
+    正文形如"在过去的24小时内，从您的IP 下载的次数超过 {IP}。请登录您的帐户或完成
+    简单注册以下载更多书籍"。这跟"这条记录文件失效"(`SiteRejected`/204) 是完全不同的
+    限制维度：**这是按出口 IP 算的匿名限额，跟这本书/这条记录本身无关**，换一本书、
+    换一条候选记录都没用，只有"换一个还有匿名额度的出口 IP"或"登录账号"才能绕开。
+    用 CSS 类名 `download-limits-error` 作检测标记（比匹配中文/英文文案更稳，
+    不受站点语言设置影响）。
+    """
+    def __init__(self, ip: str | None = None) -> None:
+        self.ip = ip
+        super().__init__(f"当前出口IP（{ip or '未知'}）匿名下载额度已用完，需登录账号或换一个出口IP")
 
 
 class SearchServiceUnavailable(Exception):
@@ -832,6 +869,8 @@ class ZLibraryClient:
                             self._http().cookies.set("c_time", f"{elapsed:.3f}", domain=dom, path="/")
                             log.info("下载端点通过浏览器校验，重试下载")
                             continue
+                        if IP_QUOTA_MARKER in r.text:
+                            raise IpQuotaExceeded(_extract_quota_ip(r.text))
                         raise _InvalidDownload(
                             f"返回 HTML 页面而非书籍文件 (HTTP {r.status_code}, "
                             f"content-type={ct}, backend={backend})")
@@ -1034,6 +1073,13 @@ def _peek_text(r: httpx.Response) -> str:
 def _cookie_domain(site: str) -> str:
     """从站点 URL 取 cookie 域（挑战页的 cookie 是 host-only，不带前导点）。"""
     return httpx.URL(site).host
+
+
+def _extract_quota_ip(html: str) -> str | None:
+    """从「每日限额已用完」错误页里提取页面标出的出口 IP（仅用于日志/提示，
+    提取失败不影响主流程，返回 None 即可）。"""
+    m = re.search(r"(?:\d{1,3}\.){3}\d{1,3}", html)
+    return m.group(0) if m else None
 
 
 def _to_float(v: str | None) -> float:
