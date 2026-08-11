@@ -225,3 +225,100 @@ for (let i = 0; ; i++)
 - `tests/test_challenge.py` 内置站点真实下发过的 `c_token` 作基准做离线回归——
   如果站点改了 PoW 算法，这个测试会第一时间失败，是最省事的预警。
 - 候选排序的 size 争论见五.7，明确不纳入，非待办。
+
+## 八、webapp 域名访问（HTTPS）—— 备案拦截与 DNS-01 绕过
+
+### 背景
+给 webapp 面板加 `https://zlib.marovlo.cloud` 域名访问，Caddy 反代到 `127.0.0.1:8765`。
+
+### 踩坑：大陆服务器未备案，HTTP-01/TLS-ALPN-01 全被拦截
+腾讯云大陆机器（81.70.166.231），`*.marovlo.cloud` 未做 ICP 备案。ACME 默认的
+HTTP-01（80）和 TLS-ALPN-01（443）验证全被拦截：
+- HTTP-01：Let's Encrypt 访问 `http://zlib.marovlo.cloud/.well-known/...` 被腾讯云
+  按 Host 头重定向到 `dnspod.qcloud.com/static/webblock.html`，返回 403。
+- TLS-ALPN-01：443 上 `Connection reset by peer`。
+- 本机 `curl -H "Host: zlib.marovlo.cloud" http://127.0.0.1/` 正常（308），证明拦截
+  只针对**外部入站**流量，本机回环不受影响——这是诊断备案拦截的关键判据。
+
+同一个拦截也导致 `img.marovlo.cloud` 证书过期 3.9 天续不下来（一直 queuing for
+renewal 但 HTTP-01 永远失败）。
+
+### 解法：DNS-01 验证（绕过备案）
+验证不走 80/443，而是 Caddy 直接调腾讯云 DNS API 写
+`_acme-challenge.<域名>` 的 TXT 记录，Let's Encrypt 查 DNS 即放行。备案拦截碰不到
+DNS 记录。
+
+#### 重编译带 DNS 插件的 Caddy
+标准版 Caddy 不含 DNS provider 插件，需用 xcaddy 重编译。服务器没装 Go，临时下载
+到 /tmp 用完不污染系统。编译要访问 GitHub，**复用 webapp 健康监控已起的 mihomo**
+（混合端口 `127.0.0.1:17890`）做代理，不单独起、不影响其他应用：
+
+```bash
+# 临时 Go（用完即弃，不装到系统）
+curl -fsSLO https://golang.google.cn/dl/go1.23.4.linux-amd64.tar.gz
+tar -xzf go1.23.4.linux-amd64.tar.gz
+export GOROOT=/tmp/go PATH=$GOROOT/bin:$PATH GOPATH=/tmp/gopath
+
+# xcaddy + 带 tencentcloud 插件编译（走 mihomo 代理）
+export HTTPS_PROXY=http://127.0.0.1:17890 HTTP_PROXY=http://127.0.0.1:17890
+go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+/tmp/gopath/bin/xcaddy build --with github.com/caddy-dns/tencentcloud --output /tmp/caddy-dns
+
+# 替换系统 caddy（原版备份在 /usr/bin/caddy.bak.YYYYMMDD）
+sudo systemctl stop caddy
+sudo cp /usr/bin/caddy /usr/bin/caddy.bak.$(date +%Y%m%d)
+sudo cp /tmp/caddy-dns /usr/bin/caddy
+sudo systemctl start caddy
+caddy list-modules | grep tencentcloud   # 验证插件装入
+```
+
+> **不用 `caddy-dns/dnspod` 插件**：它跟新版 libdns（Record 结构改了 ID/Name/Value
+> 字段）不兼容，编译报 `record.ID undefined`。`tencentcloud` 插件用腾讯云 API
+> 的 SecretId/SecretKey（不是 DNSPod 的 ID,Token 格式），在
+> https://console.cloud.tencent.com/cam/capi 创建。
+
+#### Caddyfile 全局 acme_dns
+在全局块加 `acme_dns tencentcloud`，**所有站点**（zlib + img）都走 DNS-01，
+顺带解决了 img 续不下来的老问题：
+
+```caddyfile
+{
+    email admin@marovlo.cloud
+    acme_dns tencentcloud {
+        secret_id {env.TENCENTCLOUD_SECRET_ID}
+        secret_key {env.TENCENTCLOUD_SECRET_KEY}
+    }
+}
+
+zlib.marovlo.cloud {
+    reverse_proxy 127.0.0.1:8765
+}
+```
+
+#### 凭证用 systemd drop-in 注入（不写进 Caddyfile）
+`/etc/systemd/system/caddy.service.d/dns-env.conf`：
+```ini
+[Service]
+Environment=TENCENTCLOUD_SECRET_ID=AKID...
+Environment=TENCENTCLOUD_SECRET_KEY=...
+```
+改完 `sudo systemctl daemon-reload && sudo systemctl restart caddy`。
+
+#### Let's Encrypt 失败次数限流
+HTTP-01 阶段连续失败 5 次后，LE 对该 identifier 限流 1 小时
+（`too many failed authorizations`，`retry after <UTC时间>`）。期间 Caddy 自动转
+ZeroSSL 兜底，但 ZeroSSL 的 DNS-01 实测会卡住不回包。**等 LE 限流解除后
+`restart caddy` 触发重试，DNS-01 秒过**（10 秒内 `authorization finalized: valid`
++ `certificate obtained successfully`）。
+
+### 最终架构
+```
+公网 → Caddy(443, DNS-01 自动证书) → 127.0.0.1:8765 (zlib-web.service) → FastAPI
+```
+两个 systemd 服务：`zlib-web`（面板）、`caddy`（反代+证书）。面板 8765 只绑
+127.0.0.1，不对外暴露；80/443 放行给 Caddy。
+
+### 遗留
+- 面板无鉴权（用户明确接受风险）。需要时在 Caddyfile 的 zlib 块加 `basic_auth`
+  或 `remote_ip` 白名单，不用改 Python 代码。
+- `/tmp/go` 和 `/tmp/gopath` 是编译用临时目录，可手动清理（不影响运行的 caddy）。

@@ -39,8 +39,16 @@ IP_QUOTA_MARKER = "download-limits-error"
 
 # 每个请求最多解几次挑战。站点偶尔会连着发两次（换后端时各发一次），给点余量。
 MAX_CHALLENGE_ROUNDS = 3
-# 传输层报错（节点抖动）时最多换几次出口节点重试。节点整体不稳时需要多试几个。
+# 传输层报错（节点抖动）时最多重试几次（含"原地重试"和"真的换节点"）。节点整体
+# 不稳时需要多试几个。
 MAX_TRANSPORT_RETRIES = 12
+# 出口节点抖动容忍：遇到传输层错误不要一次失败就真的换节点——大概率只是线路
+# 瞬时抖动（同一节点几秒内可能从超时恢复正常），原地重试很可能就恢复了。只有
+# 连续失败次数达到这个阈值才真的调用 rotate_node() 切换节点。体感上类似手动
+# 用 VPN：找到一个能用的节点后应该尽量长时间沿用，不该稍微抖动就换（换节点还要
+# 额外测速/校验，比原地重试开销更大）。
+SAME_NODE_RETRIES = 2       # 换节点前，先在同一节点原地重试这么多次
+SAME_NODE_RETRY_DELAY = 1.5  # 原地重试的间隔（秒）
 
 
 @dataclass
@@ -239,6 +247,18 @@ class ZLibraryClient:
             return True
         return False
 
+    def _handle_transport_error(self, transport_tries: int, reason: str) -> bool:
+        """传输层报错后，决定「原地重试」还是「真的换节点」，返回是否应继续重试。
+
+        先在同一节点原地重试 `SAME_NODE_RETRIES` 次（大概率是线路瞬时抖动，很快能
+        恢复），仍然失败才真的调用 `_rotate()` 换一个出口节点。`transport_tries`
+        从 1 开始计数。
+        """
+        if transport_tries % (SAME_NODE_RETRIES + 1) != 0:
+            time.sleep(SAME_NODE_RETRY_DELAY)
+            return True
+        return self._rotate(reason)
+
     def _reset_backend_affinity(self) -> None:
         """丢掉 `bsrv` cookie。
 
@@ -261,7 +281,7 @@ class ZLibraryClient:
     def _request(self, method: str, url: str, *, params: dict | None = None,
                  data: dict | None = None, headers: dict | None = None,
                  allow_challenge_fail: bool = False) -> httpx.Response:
-        """统一请求入口：自动解 PoW 挑战 + 传输层报错自动换节点重试。
+        """统一请求入口：自动解 PoW 挑战 + 传输层报错自动重试/换节点。
 
         这是本工具能"所有书都下得下来"的关键：站点在缺少有效 `c_token` 时对**任何**
         路径（首页/搜索/详情页/下载端点）都会返回 503 挑战页，解掉即可继续，不需要浏览器。
@@ -274,7 +294,9 @@ class ZLibraryClient:
                 r = client.request(method, url, params=params, data=data, headers=headers)
             except (httpx.TransportError, httpx.RemoteProtocolError) as e:
                 transport_tries += 1
-                if transport_tries > MAX_TRANSPORT_RETRIES or not self._rotate(f"{type(e).__name__}"):
+                if transport_tries > MAX_TRANSPORT_RETRIES or not self._handle_transport_error(
+                    transport_tries, type(e).__name__
+                ):
                     raise
                 continue
 
@@ -787,9 +809,10 @@ class ZLibraryClient:
           挑战由 `_request`/`_download_httpx` 自动解 PoW 通过；其余情况清掉 `bsrv`
           粘性 cookie 换个后端、并换出口节点重试。最后还可以回退真实浏览器。
         - **不可重试类**（`SiteRejected`：204 No Content / 0 字节）：站点侧这条记录的
-          文件已失效。实测换后端、换出口节点、换账号、用真实浏览器**全都一样是 204**，
-          所以只做一次换后端确认，然后直接抛给上层去**换另一条候选记录**（同一本书往往
-          有多条记录，另一条通常能正常下载）。继续在这条记录上重试纯属浪费。
+          文件已失效。实测换后端、换出口节点、换账号、用真实浏览器**全都一样是 204**
+          （见 DEV.md 四.1，是记录本身的属性，跟账号/节点/后端无关）——所以**不重试**，
+          直接抛给上层去**换另一条候选记录**（同一本书往往有多条记录，另一条通常能正常
+          下载）。继续在这条记录上换节点/换后端重试只是白白浪费时间。
         """
         dest_dir = dest_dir.expanduser()
         dest_dir.mkdir(parents=True, exist_ok=True)
@@ -799,7 +822,6 @@ class ZLibraryClient:
         name = f"{safe_title}" + (f" - {safe_author}" if safe_author else "") + f".{ext}"
         dest = dest_dir / name
 
-        rejections = 0
         last_invalid = ""
         for attempt in range(1, max_rounds + 1):
             # 每轮都重新取下载链接：/dl/ 短码会随会话/后端变化
@@ -809,14 +831,9 @@ class ZLibraryClient:
                 dest = self._download_httpx(dl_url, dest, dest_dir, referer)
                 log.info("下载完成: %s (%.2f MB)", dest, dest.stat().st_size / 1048576)
                 return dest
-            except SiteRejected as e:
-                rejections += 1
-                if rejections >= 2:
-                    # 换过一次后端仍被拒 → 认定这条记录的文件已失效，交给上层换候选
-                    raise
-                log.warning("被当前后端拒绝(%s)，换后端确认一次", e)
-                self._reset_backend_affinity()
-                self._rotate("下载被后端拒绝")
+            except SiteRejected:
+                log.warning("被站点拒绝（该记录的文件已失效），不重试，交给上层换候选")
+                raise
             except _InvalidDownload as e:
                 last_invalid = str(e)
                 log.warning("本轮下载内容无效: %s", e)
@@ -890,13 +907,13 @@ class ZLibraryClient:
                 raise _InvalidDownload(f"下载端点 HTTP {e.response.status_code}") from e
             except (httpx.TransportError, httpx.RemoteProtocolError) as e:
                 # 真实文件在独立的 CDN 主机上（如 dln1.ncdn.ec），当前出口节点到主站通、
-                # 到 CDN 不一定通，所以这里也要能换节点重试，否则一次抖动就白判"该记录失效"。
+                # 到 CDN 不一定通，所以这里也要能重试/换节点，否则一次抖动就白判"该记录失效"。
                 transport_tries += 1
                 dest.unlink(missing_ok=True)  # 流中断会留下半截文件，先删掉
                 if transport_tries > MAX_TRANSPORT_RETRIES:
-                    raise _InvalidDownload(f"下载传输失败（已换 {transport_tries} 个节点）: {e}") from e
-                log.warning("下载传输失败(%s)，换出口节点重试", type(e).__name__)
-                if not self._rotate(f"下载传输 {type(e).__name__}"):
+                    raise _InvalidDownload(f"下载传输失败（已重试 {transport_tries} 次）: {e}") from e
+                log.warning("下载传输失败(%s)，重试", type(e).__name__)
+                if not self._handle_transport_error(transport_tries, f"下载传输 {type(e).__name__}"):
                     raise _InvalidDownload(f"下载传输失败且无可用节点可换: {e}") from e
                 continue
             break

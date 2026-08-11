@@ -1,0 +1,11 @@
+# zlib 私人面板反向代理配置（Caddy）
+#
+# Caddy 会自动向 Let's Encrypt 申请并续期 HTTPS 证书，无需手动操作。
+# 前提：下面的域名 DNS A 记录已指向本机公网 IP，且 80/443 端口可从公网访问
+# （80 用于 ACME HTTP-01 验证 + 跳转 HTTPS，443 用于 HTTPS）。
+#
+# 用法见 webapp/README.md「域名访问（HTTPS）」一节。
+# 请把 zlib.example.com 换成你自己的域名。
+zlib.example.com {
+	reverse_proxy 127.0.0.1:8765
+}

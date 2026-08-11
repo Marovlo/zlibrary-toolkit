@@ -38,6 +38,27 @@ MIHOMO_REPO = "MetaCubeX/mihomo"
 MIHOMO_FALLBACK_VERSION = "v1.18.10"
 MIHOMO_API_BASE = "http://127.0.0.1:{port}"
 
+# 节点地区优先级：实测里国内到「近距离」节点（港澎台/新马日印）延迟低、稳定性
+# 明显好于欧美（用户长期用同一订阅手动测试的体感也是如此），欧美节点只在近距离
+# 节点全部不可用时才当兜底。这里按节点名字里的地区关键词做一个粗分类，不追求
+# 精确（订阅节点名字目前都是"地区-描述"格式，如"香港-优化2-Gemini"）。
+_NEAR_REGION_KEYWORDS = ("香港", "台湾", "新加坡", "日本", "印度", "澳门", "马来西亚", "韩国")
+
+
+def _is_near_region(name: str) -> bool:
+    return any(kw in name for kw in _NEAR_REGION_KEYWORDS)
+
+
+def _region_priority(name: str) -> int:
+    """近距离节点优先级 0，远距离（欧美等）优先级 1，数字越小越先尝试。"""
+    return 0 if _is_near_region(name) else 1
+
+
+# 轮换换节点时，近距离候选节点多给几次重试机会（应对瞬时抖动），远距离候选节点
+# 只是兜底，不值得为它们多花时间，一次不通就换下一个。
+NEAR_REGION_TEST_RETRIES = 2
+NEAR_REGION_TEST_RETRY_GAP = 1.5
+
 
 def _mihomo_arch() -> str:
     """当前系统架构 -> mihomo release资产名里用的架构标识。"""
@@ -532,7 +553,9 @@ class ProxyManager:
         ok = [r for r in results if r.ok]
         if not ok:
             return None
-        ok.sort(key=lambda r: r.delay_ms)
+        # 优先选近距离节点（哪怕远距离节点延迟数字更小）：近距离节点长期实测更稳，
+        # 远距离只作为「近距离全部不可用」时的兜底，不参与常规最优选择。
+        ok.sort(key=lambda r: (_region_priority(r.name), r.delay_ms))
         best = ok[0]
         self.switch_node(best.name)
         return best
@@ -548,8 +571,14 @@ class ProxyManager:
         把请求路由到不同后端、不同后端对同一本书的态度还不一样，所以「换出口重试」
         既能绕开线路抖动，也能绕开拒绝该资源的后端。
 
-        为避免每次轮换都全量测速，这里按节点列表顺序往后找，逐个快速验活，
-        第一个通的就用；轮换过的节点记在 `_rotated` 里不再重复。
+        **地区优先**：近距离节点（港/台/新马/日/韩/印，实测延迟低、稳定性明显更好）
+        永远排在远距离节点（欧美等）之前尝试，且每个近距离候选会多试几次
+        （`NEAR_REGION_TEST_RETRIES`，应对瞬时抖动），只有全部近距离节点都反复
+        试过仍不通，才会开始尝试远距离节点兜底。远距离节点本身只是兜底，不值得
+        为它们浪费时间重试，一次不通就换下一个。
+
+        为避免每次轮换都全量测速，这里只做「快速验活」逐个尝试，第一个通的就用；
+        轮换过的节点记在 `_rotated` 里不再重复。
         """
         try:
             nodes = self.list_nodes()
@@ -560,26 +589,45 @@ class ProxyManager:
         if not nodes:
             return None
         self._rotated.add(current or "")
-        start = nodes.index(current) + 1 if current in nodes else 0
-        order = nodes[start:] + nodes[:start]
-        for name in order:
-            if name in self._rotated:
-                continue
-            self._rotated.add(name)
-            if self._test_one(name).ok:
-                self.switch_node(name)
-                self._save_state({"node": name})
-                return name
-        # 全部轮换过一遍仍没找到可用的：清空记录再给一次机会。
+
+        def _rotated_order(group: list[str]) -> list[str]:
+            if current in group:
+                i = group.index(current) + 1
+                return group[i:] + group[:i]
+            return group
+
+        near = _rotated_order([n for n in nodes if _is_near_region(n)])
+        far = _rotated_order([n for n in nodes if not _is_near_region(n)])
+
+        def _try_group(group: list[str], retries: int) -> str | None:
+            for name in group:
+                if name in self._rotated:
+                    continue
+                self._rotated.add(name)
+                ok = self._test_one(name).ok
+                for _ in range(retries):
+                    if ok:
+                        break
+                    time.sleep(NEAR_REGION_TEST_RETRY_GAP)
+                    ok = self._test_one(name).ok
+                if ok:
+                    self.switch_node(name)
+                    self._save_state({"node": name})
+                    return name
+            return None
+
+        result = _try_group(near, NEAR_REGION_TEST_RETRIES) or _try_group(far, 0)
+        if result:
+            return result
+
+        # 全部（近+远）轮换过一遍仍没找到可用的：清空记录再给一次机会。
         # 线路抖动是常态，几十秒前不通的节点现在可能已经恢复，直接放弃太早。
         if self._rotated:
             log.info("全部 %d 个节点轮换过一遍均不可用，清空记录重新尝试一轮", len(nodes))
             self._rotated.clear()
-            for name in order:
-                if self._test_one(name).ok:
-                    self.switch_node(name)
-                    self._save_state({"node": name})
-                    return name
+            result = _try_group(near, NEAR_REGION_TEST_RETRIES) or _try_group(far, 0)
+            if result:
+                return result
         log.warning("当前没有任何可用节点")
         return None
 

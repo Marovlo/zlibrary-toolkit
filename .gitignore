@@ -18,6 +18,11 @@ clash-config.yaml
 .DS_Store
 *.log
 
+# --- webapp（私人 web 面板）前端依赖/构建产物，后端运行数据在 data/webapp/
+#     下，已被上面的 data/ 规则整体忽略，无需单独列出 ---
+webapp/frontend/node_modules/
+webapp/frontend/dist/
+
 # --- 说明 ---
 # vendor/ 需要提交（随包自带的 mihomo 二进制，用于解决"先鸡先蛋"的联网引导问题）
 # config.example.yaml / accounts.example.yaml 需要提交（不含真实密钥的模板）

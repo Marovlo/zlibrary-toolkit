@@ -1,0 +1,282 @@
+:root {
+  color-scheme: light;
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+  background: #f5f6f8;
+  color: #1f2329;
+}
+
+.app {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 16px 24px 48px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 12px 0;
+  border-bottom: 1px solid #e5e6eb;
+  margin-bottom: 20px;
+}
+
+.topbar h1 {
+  font-size: 18px;
+  margin: 0;
+  white-space: nowrap;
+}
+
+.topbar nav {
+  display: flex;
+  gap: 8px;
+  flex: 1;
+}
+
+.topbar nav button {
+  border: none;
+  background: transparent;
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  color: #4e5969;
+}
+
+.topbar nav button.active {
+  background: #eef2ff;
+  color: #3b5bfd;
+  font-weight: 600;
+}
+
+.status-badge {
+  font-size: 12px;
+  color: #4e5969;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.status-badge .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ccc;
+}
+
+.status-badge.direct .dot,
+.status-badge.proxy_ok .dot {
+  background: #2ecc71;
+}
+
+.status-badge.initializing .dot,
+.status-badge.connecting .dot,
+.status-badge.switching .dot {
+  background: #f5a623;
+}
+
+.status-badge.unavailable .dot,
+.status-badge.unknown .dot {
+  background: #e74c3c;
+}
+
+.search-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.force-refresh {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #86909c;
+  margin-bottom: 16px;
+  cursor: pointer;
+}
+
+.search-bar input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid #dcdfe6;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.search-bar select {
+  padding: 8px 10px;
+  border: 1px solid #dcdfe6;
+  border-radius: 6px;
+  font-size: 14px;
+  max-width: 260px;
+}
+
+button {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 6px;
+  background: #3b5bfd;
+  color: #fff;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+button:disabled {
+  background: #c1c8d6;
+  cursor: not-allowed;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #fff;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+th, td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid #f0f1f3;
+  font-size: 14px;
+}
+
+th {
+  background: #fafbfc;
+  color: #86909c;
+  font-weight: 500;
+}
+
+.error {
+  color: #e74c3c;
+  font-size: 13px;
+}
+
+.hint {
+  color: #86909c;
+  font-size: 13px;
+}
+
+.hint.downloading {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid #dcdfe6;
+  border-top-color: #3b5bfd;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+.search-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.search-btn .spinner {
+  border-color: rgba(255, 255, 255, 0.4);
+  border-top-color: #fff;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.book-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: #fff;
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 8px;
+}
+
+.book-row .title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.book-row .meta {
+  margin-top: 4px;
+  font-size: 13px;
+  color: #86909c;
+}
+
+.badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-left: 6px;
+  font-weight: 500;
+}
+
+.badge.full {
+  background: #e6f7e8;
+  color: #2ecc71;
+}
+
+.badge.prefix {
+  background: #e8f0fe;
+  color: #3b5bfd;
+}
+
+.action {
+  white-space: nowrap;
+  text-align: right;
+}
+
+.action a {
+  color: #3b5bfd;
+  text-decoration: none;
+  font-size: 14px;
+}
+
+.hint.success {
+  color: #2ecc71;
+}
+
+.hint.success a {
+  color: #86909c;
+  font-size: 12px;
+}
+
+.load-more {
+  text-align: center;
+  margin-top: 12px;
+}
+
+.load-more button {
+  background: #fff;
+  color: #3b5bfd;
+  border: 1px solid #dcdfe6;
+}
+
+form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+form input {
+  padding: 8px 12px;
+  border: 1px solid #dcdfe6;
+  border-radius: 6px;
+  font-size: 14px;
+}

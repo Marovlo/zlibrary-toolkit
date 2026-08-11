@@ -12,6 +12,14 @@ dependencies = [
     "rich>=13.7",
 ]
 
+[project.optional-dependencies]
+# Web 私人面板专用依赖，跟CLI 核心解耦：只克隆仓库用 CLI 的人不需要装这些。
+# 安装方式：pip install -e ".[web]"
+web = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+]
+
 [project.scripts]
 zlib = "zlibrary.cli:main"
 

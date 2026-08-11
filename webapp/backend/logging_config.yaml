@@ -1,0 +1,42 @@
+# uvicorn 日志配置：统一时间戳 + logger 名称 + 线程名格式，跟 CLI（zlib -v）的
+# 日志风格保持一致（`%(asctime)s %(levelname)-7s %(name)s: %(message)s`），并额外
+# 加上线程名用于区分模块来源。
+#
+# 背景1：uvicorn 默认不传 --log-config 时会用自己内置的日志配置（无时间戳，
+# 格式类似 `INFO:     127.0.0.1:xxx - "GET ... HTTP/1.1" 200 OK`），且会在
+# Server.run() 里用 dictConfig 整体重置 root/uvicorn 相关 logger，覆盖掉
+# main.py 里手动调的 logging.basicConfig()。显式传这份配置即可统一成一种格式。
+#
+# 背景2：`%(name)s` 只能看出是哪个模块打的日志（如 `zlibrary.client`），但看不出
+# 这条日志是「后台健康监控线程的探测」还是「某个真实搜索/下载请求触发的」——两者
+# 都会调用到 `zlibrary.*` 里同样的函数、用同样的 logger 名字。加上 `%(threadName)s`
+# 后就能区分：健康监控线程固定叫 `health-monitor`；每个下载任务线程叫
+# `download_N`（见 jobs.py 的 `thread_name_prefix="download"`）；处理搜索/账号等
+# 同步接口请求的是 FastAPI/Starlette 的线程池工作线程（`AnyIO worker thread` 等）。
+version: 1
+disable_existing_loggers: false
+formatters:
+  default:
+    format: "%(asctime)s %(levelname)-7s [%(threadName)s] %(name)s: %(message)s"
+    datefmt: "%H:%M:%S"
+handlers:
+  default:
+    class: logging.StreamHandler
+    formatter: default
+    stream: ext://sys.stdout
+loggers:
+  uvicorn:
+    handlers: [default]
+    level: INFO
+    propagate: false
+  uvicorn.error:
+    handlers: [default]
+    level: INFO
+    propagate: false
+  uvicorn.access:
+    handlers: [default]
+    level: INFO
+    propagate: false
+root:
+  handlers: [default]
+  level: INFO
