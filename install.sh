@@ -72,6 +72,13 @@ else
     info "accounts.yaml 已存在，跳过生成"
 fi
 
+if [ ! -f baidu.yaml ]; then
+    cp baidu.example.yaml baidu.yaml
+    info "已生成空的 baidu.yaml，稍后用 zlib add-baidu-cookies 添加百度网盘凭证"
+else
+    info "baidu.yaml 已存在，跳过生成"
+fi
+
 echo
 info "安装完成！接下来："
 echo "  0. source .venv/bin/activate   # 每次新开终端都需要先执行这一步"
@@ -79,7 +86,8 @@ echo "  1. 设置代理订阅（二选一）："
 echo "     - zlib set-subscription \"<你的clash订阅链接>\"（会自动验证是否有效）"
 echo "     - 或手动编辑 config.yaml 的 subscription_url"
 echo "  2. zlib add-account <email> <password>   # 添加账号（可选，不加则匿名下载，受IP每日限额）"
-echo "  3. zlib download \"书名\"                  # 搜索并选择下载"
+echo "  3. zlib add-baidu-cookies                # 添加百度网盘凭证（可选，用于自动上传+分享）"
+echo "  4. zlib download \"书名\"                  # 搜索并选择下载"
 echo
-echo "常用命令：zlib status / zlib stop / zlib logout / zlib upgrade-mihomo"
+echo "常用命令：zlib status / zlib stop / zlib logout / zlib upgrade-mihomo / zlib upgrade-baidupcs"
 echo "详细说明（账号策略、IP限额、候选排序规则等）：zlib help"

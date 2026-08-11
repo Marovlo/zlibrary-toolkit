@@ -21,8 +21,8 @@
 # 浏览器访问 http://<服务器IP>:8765
 ```
 
-体验没问题后，想让它开机自启、常驻后台，看下面「生产部署」一节（systemd + 可选
-的域名 HTTPS）。
+体验没问题后，想让它开机自启、常驻后台，看下面「生产部署」一节（systemd，
+默认 IP:端口明文访问；域名 HTTPS 为可选）。
 
 ## 目录结构
 
@@ -44,7 +44,7 @@ webapp/
 ├── frontend/# Vue3 + Vite 前端（搜索/书库/账号 三个页签）
 ├── install_web.sh       # 装 web 依赖（fastapi/uvicorn）+ 构建前端
 ├── logging_config.yaml  # uvicorn 日志格式（统一时间戳+logger名称+线程名，跟 CLI 风格一致）
-├── Caddyfile            # 域名 HTTPS 反代配置示例（需替换成你自己的域名）
+├── Caddyfile            # 可选：域名 HTTPS 反代配置示例（需替换成你自己的已备案域名）
 ├── zlib-web.service     # systemd 服务单元示例（需按实际路径调整）
 └── run.sh               # 启动（前后端同一端口）
 ```
@@ -59,14 +59,39 @@ webapp/
 `./webapp/run.sh` 默认监听 `0.0.0.0:8765`，可选环境变量：`ZLIB_WEB_HOST`
 （默认 `0.0.0.0`）、`ZLIB_WEB_PORT`（默认 `8765`）。
 
-## 生产部署：systemd + 域名 HTTPS（可选）
+## 生产部署：systemd（默认，IP:端口明文访问）
 
 「快速开始」里的 `run.sh` 是前台运行，关掉终端就会停。想让它开机自启、常驻
-后台、并配上你自己的域名和 HTTPS，按下面步骤来。
+后台，按下面步骤来即可——**默认就是明文 HTTP、直接 `http://<服务器IP>:8765`
+访问，不需要域名、不需要 CDN**。
 
-仓库自带 `webapp/Caddyfile`，用 [Caddy](https://caddyserver.com/) 做反向代理，
+```bash
+# 面板服务：装仓库自带的 unit（默认绑 0.0.0.0:8765，对外直接明文访问）
+#    注意：unit 文件里 WorkingDirectory/ExecStart 路径写死为 /root/zlibrary，
+#    如果你的仓库路径不同，先编辑 webapp/zlib-web.service 改成实际路径。
+sudo cp webapp/zlib-web.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now zlib-web
+
+# 看日志
+sudo journalctl -u zlib-web -f        # 面板日志
+```
+
+完成后访问 `http://<服务器IP>:8765` 即可。
+
+> **关于端口放行**：云服务器安全组需放行 **8765**（TCP，入站）。面板绑在
+> `0.0.0.0`，明文 HTTP，无 TLS。
+
+> **关于访问控制**：面板本身无登录/鉴权，挂到公网后任何知道 IP:端口的人都能
+> 搜索/下载/管理账号池。如需限制，可在安全组里做 IP 白名单，或用 Caddy 反代并加
+> `basic_auth`（见下一节）。
+
+## 可选：用域名 + HTTPS（Caddy 反代）
+
+如果你有自己的**已备案域名**，想用 `https://你的域名` 访问（而不是裸 IP:端口），
+仓库自带 `webapp/Caddyfile` 可用 [Caddy](https://caddyserver.com/) 做反向代理，
 自动申请并续期 Let's Encrypt 证书。下面以 `zlib.example.com` 为例，**请换成你
-自己的域名**。
+自己的域名**。注意：未备案域名在国内会被拦截，此方案仅适用于已备案域名。
 
 ### 前置：DNS 解析
 
@@ -95,17 +120,10 @@ sudo apt update && sudo apt install -y caddy
 
 ### 部署配置 + 启动
 
-面板（uvicorn）和 Caddy 都用 systemd 常驻，开机自启、自动重启。
+Caddy 用 systemd 常驻，开机自启、自动重启。
 
 ```bash
-# 1) 面板服务：装仓库自带的 unit（绑 127.0.0.1:8765，只让本机 Caddy 转发）
-#    注意：unit 文件里 WorkingDirectory/ExecStart 路径写死为 /root/zlibrary，
-#    如果你的仓库路径不同，先编辑 webapp/zlib-web.service 改成实际路径。
-sudo cp webapp/zlib-web.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now zlib-web
-
-# 2) Caddy 反代：把 zlib 块**追加**到现有 Caddyfile（不要用 cp 覆盖！
+# 把 zlib 块**追加**到现有 Caddyfile（不要用 cp 覆盖！
 #    机器上 Caddy 可能已在管其他站点，覆盖会丢掉它们）
 #    把下面的 zlib.example.com 换成你自己的域名。
 sudo tee -a /etc/caddy/Caddyfile > /dev/null << 'EOF'
@@ -118,7 +136,6 @@ EOF
 sudo systemctl reload caddy
 
 # 看日志
-sudo journalctl -u zlib-web -f        # 面板日志
 sudo journalctl -u caddy -f           # 证书申请 / 反代日志
 ```
 
@@ -128,12 +145,8 @@ sudo journalctl -u caddy -f           # 证书申请 / 反代日志
 > 生产常驻用上面的 systemd 服务，两者启动的是同一个 uvicorn，只是托管方式不同。
 
 > **关于 80/443 端口**：云服务器需要在安全组放行 80 和 443（TCP）；
-> 80 仅用于证书申请与跳转，443 是实际 HTTPS 流量。8765 不需要对外放行
-> （面板已绑在 127.0.0.1，只让本机 Caddy 转发）。
-
-> **关于访问控制**：面板本身无登录/鉴权，挂到公网后任何知道域名的人都能
-> 搜索/下载/管理账号池。如需限制，可在 Caddyfile 里加 `basic_auth`
-> 或 `remote_ip` 白名单（见 Caddy 文档）。
+> 80 仅用于证书申请与跳转，443 是实际 HTTPS 流量。8765 仍是对外明文端口
+> （除非把 unit 改回绑 127.0.0.1 只让本机 Caddy 转发）。
 
 ## 功能
 

@@ -55,6 +55,17 @@ class AccessConfig:
 
 
 @dataclass
+class BaidupcsConfig:
+    binary_path: str
+    pan_dir: str
+    share_period: int = 0  # 0=永久
+
+    def binary_abs(self) -> Path:
+        p = Path(self.binary_path)
+        return p if p.is_absolute() else project_root() / p
+
+
+@dataclass
 class Config:
     subscription_url: str
     default_site: str
@@ -63,6 +74,7 @@ class Config:
     mihomo: MihomoConfig
     site_finder: SiteFinderConfig
     access: AccessConfig
+    baidupcs: BaidupcsConfig
     raw: dict[str, Any] = field(default_factory=dict)
 
     def download_dir_abs(self) -> Path:
@@ -102,6 +114,11 @@ class Config:
                 httpx_timeout=data["access"]["httpx_timeout"],
                 playwright_timeout=data["access"]["playwright_timeout"],
                 max_retries=data["access"]["max_retries"],
+            ),
+            baidupcs=BaidupcsConfig(
+                binary_path=data.get("baidupcs", {}).get("binary_path", "data/baidupcs"),
+                pan_dir=data.get("baidupcs", {}).get("pan_dir", "/zlibrary"),
+                share_period=data.get("baidupcs", {}).get("share_period", 0),
             ),
             raw=data,
         )

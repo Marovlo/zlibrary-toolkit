@@ -1,6 +1,6 @@
 # zlib 私人 web 面板 systemd 服务单元
 #
-# 用法见 webapp/README.md「域名访问（HTTPS）」一节。
+# 默认：明文 HTTP，直接以 http://<服务器IP>:8765 访问，不依赖域名/CDN。
 # 安装：
 #   sudo cp webapp/zlib-web.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
@@ -10,7 +10,7 @@
 # 如果你的仓库不在 /root/zlibrary 或不以 root 运行，请相应修改下方三处。
 [Unit]
 Description=zlib 私人 web 面板 (FastAPI + uvicorn)
-After=network-online.target caddy.service
+After=network-online.target
 Wants=network-online.target
 
 [Service]
@@ -19,7 +19,7 @@ User=root
 WorkingDirectory=/root/zlibrary
 ExecStart=/root/zlibrary/.venv/bin/python -m uvicorn app.main:app \
     --app-dir /root/zlibrary/webapp/backend \
-    --host 127.0.0.1 --port 8765 \
+    --host 0.0.0.0 --port 8765 \
     --log-config /root/zlibrary/webapp/backend/logging_config.yaml
 Restart=on-failure
 RestartSec=3

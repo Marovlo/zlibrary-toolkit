@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from .health import health_monitor
-from .routers import accounts, archive, download, search, status
+from .routers import accounts, archive, baidu, download, search, status
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,6 +39,7 @@ app.include_router(accounts.router)
 app.include_router(search.router)
 app.include_router(download.router)
 app.include_router(archive.router)
+app.include_router(baidu.router)
 app.include_router(status.router)
 
 _FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"

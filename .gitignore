@@ -11,6 +11,7 @@ dist/
 # --- 运行期数据（含账号密码、登录 cookie、订阅节点等敏感信息，不应提交） ---
 data/
 accounts.yaml
+baidu.yaml
 config.yaml
 clash-config.yaml
 

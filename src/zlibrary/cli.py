@@ -533,6 +533,20 @@ def status() -> None:
     else:
         click.echo("登录态: 未保存")
 
+    # 百度网盘
+    from .baidupcs import BaiduPCSManager, load_cookies
+
+    mgr = BaiduPCSManager(cfg)
+    click.echo(f"BaiduPCS-Go 版本: {mgr.binary_version()}")
+    if load_cookies():
+        if mgr.is_logged_in():
+            who = mgr._run("who").stdout.strip()
+            click.echo(f"百度网盘: 已登录 ({who or '未知账号'})")
+        else:
+            click.echo("百度网盘: 已配置 cookies（当前未登录，下次使用时会自动登录）")
+    else:
+        click.echo("百度网盘: 未配置（zlib add-baidu-cookies 添加）")
+
 
 @cli.command("upgrade-mihomo")
 def upgrade_mihomo() -> None:
@@ -556,6 +570,51 @@ def upgrade_mihomo() -> None:
         click.echo(f"已是最新版本: {new}")
     else:
         click.echo(f"✓ mihomo 已升级: {old} -> {new}")
+
+
+@cli.command("add-baidu-cookies")
+@click.argument("cookies", required=False)
+def add_baidu_cookies(cookies: str | None) -> None:
+    """添加百度网盘登录凭证：先验证 cookies 能否登录，成功才写入 baidu.yaml。
+
+    cookies 获取方法：浏览器登录 pan.baidu.com → F12 → Application → Cookies →
+    复制 BDUSS 和 STOKEN（必须从 pan.baidu.com 取），或直接复制整段 Cookie 字符串。
+    """
+    if not cookies:
+        click.echo("请粘贴百度网盘 cookies（从 pan.baidu.com 的 F12 → Cookies 取）：")
+        cookies = click.prompt("cookies", hide_input=True)
+
+    cfg = Config.load()
+    from .baidupcs import BaiduPCSManager
+
+    mgr = BaiduPCSManager(cfg)
+    mgr.ensure_binary()
+    click.echo("验证 cookies 中...")
+    ok, msg = mgr.login(cookies)
+    if not ok:
+        raise click.ClickException(f"cookies 验证失败，未写入。原因: {msg}")
+    click.echo(f"✓ 登录成功: {msg}")
+    from .baidupcs import save_cookies
+
+    save_cookies(cookies)
+    click.echo(f"✓ cookies 已写入 {project_root() / 'baidu.yaml'}")
+
+
+@cli.command("upgrade-baidupcs")
+def upgrade_baidupcs() -> None:
+    """检查并升级 BaiduPCS-Go 到 GitHub 最新版本（经当前代理线路下载）。"""
+    cfg = Config.load()
+    site, proxy_url, pm = _ensure_access(cfg)
+    from .baidupcs import BaiduPCSManager
+
+    mgr = BaiduPCSManager(cfg)
+    mgr.ensure_binary()
+    click.echo(f"当前版本: {mgr.binary_version()}，检查更新中...")
+    old, new = mgr.upgrade_binary(proxy_url)
+    if old == new:
+        click.echo(f"已是最新版本: {new}")
+    else:
+        click.echo(f"✓ BaiduPCS-Go 已升级: {old} -> {new}")
 
 
 @cli.command()
@@ -599,9 +658,11 @@ Z-Library 一键搜索下载工具 - 详细说明
   zlib download <书名>              搜索并列出候选下载列表，手动选择序号下载
   zlib download <书名> -y           自动下载排序最优的候选，不进入交互选择
   zlib add-account <邮箱> [密码]     添加/更新账号（先真实登录测试，成功才写入 accounts.yaml）
+  zlib add-baidu-cookies [cookies]   添加百度网盘凭证（先验证能否登录，成功才写入 baidu.yaml）
   zlib set-subscription <链接>      设置/更新代理订阅链接，并立即验证是否有效
-  zlib status                       查看代理/登录态状态
+  zlib status                       查看代理/登录态/百度网盘状态
   zlib upgrade-mihomo                升级本地 mihomo 代理内核到最新版
+  zlib upgrade-baidupcs              升级 BaiduPCS-Go 到最新版
   zlib stop                          停止后台常驻的代理进程
   zlib logout                        清除本地保存的登录态
   全局选项 -v/--verbose 放在 zlib 之后可看详细日志，如 zlib -v download 三体

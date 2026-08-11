@@ -49,6 +49,7 @@ class ArchivedBook:
     rating: float
     file_path: str
     downloaded_at: float
+    share_url: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -56,12 +57,12 @@ class ArchivedBook:
             "title": self.title, "author": self.author, "year": self.year,
             "language": self.language, "format": self.format,
             "size_bytes": self.size_bytes, "rating": self.rating,
-            "downloaded_at": self.downloaded_at,
+            "downloaded_at": self.downloaded_at, "share_url": self.share_url,
         }
 
 
 _COLUMNS = ("id", "book_id", "hash", "title", "author", "year", "language",
-            "format", "size_bytes", "rating", "file_path", "downloaded_at")
+            "format", "size_bytes", "rating", "file_path", "downloaded_at", "share_url")
 _SELECT = f"SELECT {', '.join(_COLUMNS)} FROM books"
 
 
@@ -82,10 +83,16 @@ def _conn() -> sqlite3.Connection:
             rating REAL DEFAULT 0,
             file_path TEXT NOT NULL,
             downloaded_at REAL NOT NULL,
+            share_url TEXT DEFAULT '',
             UNIQUE(book_id, hash)
         )
         """
     )
+    # 老库迁移：share_url 列可能不存在（升级前创建的表）
+    try:
+        conn.execute("ALTER TABLE books ADD COLUMN share_url TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass  # 列已存在
     return conn
 
 
@@ -102,15 +109,15 @@ def find_by_book(book_id: str, hash_: str) -> ArchivedBook | None:
 
 
 def add(book_id: str, hash_: str, title: str, author: str, year: str, language: str,
-        fmt: str, file_path: Path, rating: float = 0.0) -> ArchivedBook:
+        fmt: str, file_path: Path, rating: float = 0.0, share_url: str = "") -> ArchivedBook:
     size_bytes = file_path.stat().st_size
     now = time.time()
     with _DB_LOCK, _conn() as conn:
         conn.execute(
             """
             INSERT INTO books
-                (book_id, hash, title, author, year, language, format, size_bytes, rating, file_path, downloaded_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                (book_id, hash, title, author, year, language, format, size_bytes, rating, file_path, downloaded_at, share_url)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(book_id, hash) DO UPDATE SET
                 title=excluded.title, author=excluded.author, year=excluded.year,
                 language=excluded.language, format=excluded.format,
@@ -118,11 +125,22 @@ def add(book_id: str, hash_: str, title: str, author: str, year: str, language: 
                 file_path=excluded.file_path, downloaded_at=excluded.downloaded_at
             """,
             (book_id, hash_, title, author, year, language, fmt, size_bytes, rating,
-             str(file_path), now),
+             str(file_path), now, share_url),
         )
         conn.commit()
         row = conn.execute(f"{_SELECT} WHERE book_id=? AND hash=?", (book_id, hash_)).fetchone()
     return ArchivedBook(*row)
+
+
+def set_share_url(book_id: str, hash_: str, share_url: str) -> bool:
+    """上传到百度云盘成功后更新分享链接。返回是否更新了记录。"""
+    with _DB_LOCK, _conn() as conn:
+        cur = conn.execute(
+            "UPDATE books SET share_url=? WHERE book_id=? AND hash=?",
+            (share_url, book_id, hash_),
+        )
+        conn.commit()
+        return cur.rowcount > 0
 
 
 def list_all(query: str = "") -> list[ArchivedBook]:

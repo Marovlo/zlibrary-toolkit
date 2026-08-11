@@ -26,9 +26,16 @@ const errorMsg = ref("");
 // 操作（下载本地书库的书完全不走网络，跟这个请求毫无关联，不会有冲突）。
 let abortController = null;
 
+const DEFAULT_ACCOUNT = "yukirazhang@tencent.com";
+
 async function loadAccounts() {
   try {
     accounts.value = await api.listAccounts();
+    // 默认优先选 yukirazhang 这个账号（可用时），否则退回匿名
+    const pref = accounts.value.find(
+      (a) => a.email === DEFAULT_ACCOUNT && a.available
+    );
+    if (pref) accountEmail.value = pref.email;
   } catch (e) {
     // 账号列表加载失败不影响匿名搜索，静默忽略
   }
@@ -49,12 +56,16 @@ async function checkLocal() {
   const q = query.value.trim();
   if (!q) return;
   errorMsg.value = "";
+  stage.value = "local_checked";
   try {
     localHits.value = await api.listArchive(q);
   } catch (e) {
     localHits.value = []; // 本地检查失败不阻塞后续云端搜索，静默忽略
   }
-  stage.value = "local_checked";
+  // 本地书库无匹配时自动发起云端搜索，无需用户再点一次
+  if (localHits.value.length === 0) {
+    await searchCloud();
+  }
 }
 
 async function searchCloud() {

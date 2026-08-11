@@ -1,0 +1,9 @@
+# 百度网盘登录凭证模板。
+# 使用方法：zlib add-baidu-cookies（会先验证 cookies 是否能登录，成功才写入 baidu.yaml）
+#
+# cookies 获取：浏览器登录 pan.baidu.com → F12 → Application → Cookies →
+# 复制 BDUSS 和 STOKEN（必须从 pan.baidu.com 取，不是 www.baidu.com）。
+# 或者直接复制整段 Cookie 字符串。
+#
+# baidu.yaml 已加入 .gitignore（含真实登录凭证，不会被提交到仓库）。
+cookies: ""

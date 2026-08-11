@@ -13,6 +13,7 @@ def _to_status(job: jobs.Job) -> JobStatus:
     return JobStatus(
         id=job.id, status=job.status, progress=job.progress,
         message=job.message, error=job.error, archived_id=job.archived_id,
+        phase=job.phase, share_url=job.share_url or None,
     )
 
 

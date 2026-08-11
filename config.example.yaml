@@ -47,3 +47,10 @@ access:
   httpx_timeout: 30
   playwright_timeout: 60
   max_retries: 2
+
+# 百度网盘（BaiduPCS-Go）配置
+# cookies 通过 `zlib add-baidu-cookies` 命令添加，存在 baidu.yaml（不写在这里）。
+baidupcs:
+  binary_path: "data/baidupcs"        # 二进制相对路径（首次运行自动从 vendor/baidupcs/ 解压）
+  pan_dir: "/zlibrary"                # 网盘上的目标文件夹（所有上传的书集中放这里）
+  share_period: 0                     # 分享有效天数，0=永久

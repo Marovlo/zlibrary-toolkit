@@ -7,12 +7,14 @@ const props = defineProps({
   accountEmail: { type: String, default: "" },
 });
 
-const status = ref("idle"); // idle|running|success|failed
+const status = ref("idle"); // idle|running|success|failed（pending 在前端按 running 展示）
+const phase = ref("");      // downloading|uploading|done|submitting
 const message = ref("");
 const errorMsg = ref("");
 const archivedId = ref(null);
+const shareUrl = ref("");
+const copied = ref(false);
 let timer = null;
-let autoSaved = false; // 确保同一次下载只自动触发一次保存
 
 // 下载状态轮询：不需要很实时，2.5秒一次足够，避免请求过于频繁（也避免后台日志刷屏）。
 const POLL_INTERVAL = 2500;
@@ -24,12 +26,8 @@ function stopPoll() {
   }
 }
 
-/** 下载完成后不再需要用户手动点击链接确认——直接用隐藏的 <a> 触发浏览器保存到
- * 本地。后端文件接口带 Content-Disposition: attachment，浏览器会当成文件下载
- * 而不是跳转页面，同源请求也不会被当成弹窗拦截。*/
-function autoSave(id) {
-  if (autoSaved) return;
-  autoSaved = true;
+/** 触发浏览器下载（点击隐藏 <a>，后端带 Content-Disposition: attachment） */
+function downloadLocal(id) {
   const a = document.createElement("a");
   a.href = api.archiveFileUrl(id);
   a.rel = "noopener";
@@ -38,14 +36,40 @@ function autoSave(id) {
   a.remove();
 }
 
+async function copyShare() {
+  if (!shareUrl.value) return;
+  try {
+    await navigator.clipboard.writeText(shareUrl.value);
+    copied.value = true;
+    setTimeout(() => { copied.value = false; }, 2000);
+  } catch (e) {
+    // 降级：选中文本让用户手动复制
+    prompt("复制分享链接：", shareUrl.value);
+  }
+}
+
+// 后端 job 刚提交时是 "pending"（线程刚入队、还没跑到下载阶段）。这段时间若直接
+// 用 "pending" 渲染，会匹配不到任何模板分支而显示空白。统一当成"提交中"的 running
+// 态展示，直到后端给出 running/success/failed，避免出现"卡一下"的空白间隙。
+function applyJob(job) {
+  if (job.status === "pending") {
+    status.value = "running";
+    phase.value = "submitting";
+    message.value = "正在提交下载任务...";
+    return;
+  }
+  status.value = job.status;
+  phase.value = job.phase || "";
+  message.value = job.message || phaseLabel(job.phase);
+}
+
 async function poll(jobId) {
   try {
     const job = await api.getJob(jobId);
-    status.value = job.status;
-    message.value = job.message;
+    applyJob(job);
     if (job.status === "success") {
       archivedId.value = job.archived_id;
-      autoSave(job.archived_id);
+      shareUrl.value = job.share_url || "";
       stopPoll();
       return;
     }
@@ -64,9 +88,9 @@ async function poll(jobId) {
 
 async function startDownload() {
   status.value = "running";
+  phase.value = "submitting";
   errorMsg.value = "";
   message.value = "正在提交下载任务...";
-  autoSaved = false;
   try {
     const job = await api.startDownload({
       book_id: props.book.book_id,
@@ -82,11 +106,10 @@ async function startDownload() {
       download_url: props.book.download_url,
       account_email: props.accountEmail,
     });
-    status.value = job.status;
-    message.value = job.message;
+    applyJob(job);
     if (job.status === "success") {
       archivedId.value = job.archived_id;
-      autoSave(job.archived_id);
+      shareUrl.value = job.share_url || "";
       return;
     }
     if (job.status === "failed") {
@@ -100,8 +123,17 @@ async function startDownload() {
   }
 }
 
+// 阶段文案：轮询间隙（每 2.5s 一次）也始终有文字，避免"卡住"的空白感
+function phaseLabel(ph) {
+  if (ph === "downloading") return "云端下载中...";
+  if (ph === "uploading") return "上传网盘中...";
+  if (ph === "submitting") return "正在提交下载任务...";
+  return "处理中...";
+}
+
 function retry() {
   status.value = "idle";
+  phase.value = "";
   errorMsg.value = "";
 }
 
@@ -124,13 +156,16 @@ onUnmounted(stopPoll);
     </div>
     <div class="action">
       <button v-if="status === 'idle'" @click="startDownload">下载</button>
-      <span v-else-if="status === 'running'" class="hint downloading">
-        <span class="spinner"></span>{{ message || "处理中..." }}
+      <span v-else-if="status === 'running'" class="progress-pill">
+        <span class="spinner"></span>{{ message || phaseLabel(phase) }}
       </span>
-      <span v-else-if="status === 'success'" class="hint success">
-        已自动保存到本地
-        <a :href="api.archiveFileUrl(archivedId)" target="_blank">（重新保存）</a>
-      </span>
+      <div v-else-if="status === 'success'" class="success-actions">
+        <button class="btn-dl" @click="downloadLocal(archivedId)">下载到本地</button>
+        <button v-if="shareUrl" class="btn-share" @click="copyShare">
+          {{ copied ? "已复制" : "复制分享链接" }}
+        </button>
+        <span v-else class="hint no-share" :title="message">无分享链接</span>
+      </div>
       <span v-else-if="status === 'failed'">
         <span class="error">{{ errorMsg }}</span>
         <button @click="retry">重试</button>
@@ -138,3 +173,56 @@ onUnmounted(stopPoll);
     </div>
   </div>
 </template>
+
+<style scoped>
+.progress-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #eef3ff;
+  color: #2c5fe0;
+  border: 1px solid #c9d8ff;
+  padding: 4px 12px;
+  border-radius: 4px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.progress-pill .spinner {
+  border-color: #b9ccff;
+  border-top-color: #2c5fe0;
+}
+.success-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.btn-dl {
+  background: #2c7be5;
+  color: #fff;
+  border: none;
+  padding: 4px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.btn-dl:hover {
+  background: #1a68d4;
+}
+.btn-share {
+  background: #f5f5f5;
+  color: #333;
+  border: 1px solid #d0d0d0;
+  padding: 3px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.btn-share:hover {
+  background: #eaeaea;
+}
+.no-share {
+  color: #999;
+  font-size: 12px;
+}
+</style>

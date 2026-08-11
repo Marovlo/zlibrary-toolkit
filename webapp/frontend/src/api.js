@@ -35,4 +35,6 @@ export const api = {
   deleteArchive: (id) => request("DELETE", `/archive/${id}`),
   archiveFileUrl: (id) => `${BASE}/archive/${id}/file`,
   getStatus: (refresh = false) => request("GET", `/status${refresh ? "?refresh=true" : ""}`),
+  getBaidu: () => request("GET", "/baidu"),
+  addBaidu: (cookies) => request("POST", "/baidu", { cookies }),
 };

@@ -60,6 +60,8 @@ class JobStatus(BaseModel):
     message: str
     error: str
     archived_id: int | None = None
+    phase: str = ""  # downloading|uploading|done
+    share_url: str | None = None
 
 
 class ArchivedBookOut(BaseModel):
@@ -74,6 +76,7 @@ class ArchivedBookOut(BaseModel):
     size_bytes: int
     rating: float
     downloaded_at: float
+    share_url: str = ""
 
 
 class StatusOut(BaseModel):
@@ -84,3 +87,14 @@ class StatusOut(BaseModel):
     message: str = ""
     error: str | None = None
     checked_at: float = 0.0
+
+
+class BaiduStatus(BaseModel):
+    configured: bool       # baidu.yaml 是否已配置 cookies
+    logged_in: bool        # BaiduPCS-Go 当前是否处于登录态
+    account: str = ""      # who 命令返回的账号信息
+    binary_version: str = ""
+
+
+class AddBaiduRequest(BaseModel):
+    cookies: str

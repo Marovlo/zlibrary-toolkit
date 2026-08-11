@@ -1,0 +1,67 @@
+# Global options
+{
+	# Let's Encrypt ACME 账户邮箱（用来接收证书到期提醒；不填也能用，但不推荐）
+	email admin@marovlo.cloud
+	# 域名 NS 已迁到 Cloudflare、且 80 端口对外可达，用默认 HTTP-01 验证即可，
+	# 无需 DNS 插件（Debian 版 caddy 未内置 cloudflare 插件，且没必要）。
+	# Cloudflare 用 Flexible 模式回源（仅 HTTP 到本机 80），故关闭 80->443 的
+	# 自动跳转(disable_redirects)，避免回源时与 Cloudflare 形成 302 重定向循环。
+	# 443 仍正常提供 TLS，证书照常自动管理。
+	auto_https disable_redirects
+}
+
+# 图床服务
+img.marovlo.cloud {
+	# 盗链防护：仅当请求带 Referer 且 Referer 不是本域名时拒绝。
+	# 没有 Referer（curl、Typora、浏览器地址栏直接打开、隐私浏览）一律放行——
+	# 这正是图床被嵌入 markdown / 直接分享 URL 的正常场景。
+	# 想拦的是"别人把你的图嵌进他网站当免费 CDN"。
+	@hotlink {
+		path /i/*
+		header Referer *://*
+		not header_regexp Referer ^https?://([^/]+\.)?marovlo\.cloud([:/]|$)
+	}
+	respond @hotlink "hotlinking forbidden" 403
+
+	# 反代到本机 imgbed 服务
+	reverse_proxy 127.0.0.1:8443 {
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	# 安全头
+	header {
+		# 防点击劫持
+		X-Frame-Options DENY
+		# 禁 MIME 嗅探
+		X-Content-Type-Options nosniff
+		# 仅开放图片加载
+		Referrer-Policy no-referrer-when-downgrade
+	}
+
+	# 上传接口：限制包体最大 12MB（预留点余量给 header；图床本身限 10MB）
+	request_body {
+		max_size 12MB
+	}
+
+	# 访问日志
+	log {
+		output file /var/log/caddy/img.marovlo.cloud.log {
+			roll_size 10mb
+			roll_keep 10
+			roll_keep_for 720h
+		}
+		format json
+	}
+}
+
+# Bitcoin Puzzle 协调者
+:80 {
+reverse_proxy 127.0.0.1:8080
+}
+
+
+# zlib 私人面板
+zlib.marovlo.cloud {
+	reverse_proxy 127.0.0.1:8765
+}

@@ -12,6 +12,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from . import archive
 from .accounts_store import get_account_store
@@ -32,6 +33,8 @@ class Job:
     message: str = ""
     error: str = ""
     archived_id: int | None = None
+    phase: str = ""  # downloading|uploading|done
+    share_url: str = ""
     created_at: float = field(default_factory=time.time)
 
 
@@ -81,6 +84,12 @@ def _friendly_download_error(e: Exception) -> str:
     return "下载失败，请稍后重试或换一个候选版本"
 
 
+def _baidu_enabled() -> bool:
+    """百度网盘是否已配置（cookies 存在且二进制可用）。"""
+    from zlibrary.baidupcs import load_cookies
+    return load_cookies() is not None
+
+
 def _run(job: Job, payload: dict) -> None:
     from zlibrary.client import BookResult
 
@@ -96,66 +105,116 @@ def _run(job: Job, payload: dict) -> None:
     # 已存档过，直接本地命中，不再访问 Z-Library
     existing = archive.find_by_book(book.book_id, book.hash)
     if existing:
-        _set(job, status="success", progress=1.0, message="已存档，直接使用本地文件",
-             archived_id=existing.id)
-        return
+        archived_id = existing.id
+        file_path = Path(existing.file_path)
+        # 已有分享链接 → 直接返回，跳过下载和上传
+        if existing.share_url:
+            _set(job, status="success", progress=1.0, phase="done",
+                 message="已存档且已上传，可直接下载或复制分享链接",
+                 archived_id=archived_id, share_url=existing.share_url)
+            return
+        # 有本地文件但没上传过 → 跳到上传阶段
+        _set(job, status="running", phase="uploading", progress=0.0,
+             message="本地已有文件，准备上传到百度网盘...", archived_id=archived_id)
+    else:
+        # ---------- 下载阶段 ----------
+        _set(job, status="running", phase="downloading", message="正在连接节点/账号...")
+        account_email = payload.get("account_email") or ""
+        try:
+            client, acc = get_logged_in_client(account_email)
+        except ValueError as e:
+            _set(job, status="failed", error=str(e))
+            return
 
-    _set(job, status="running", message="正在连接节点/账号...")
-    account_email = payload.get("account_email") or ""
-    try:
-        client, acc = get_logged_in_client(account_email)
-    except ValueError as e:
-        _set(job, status="failed", error=str(e))
-        return
+        _set(job, message="正在获取下载链接...")
+        dest_dir = archive.library_dir()
+        expected_bytes = _parse_size_bytes(book.size)
+        guess_dest = dest_dir / _guess_dest_name(book)
+        stop_flag = threading.Event()
 
-    _set(job, message="正在获取下载链接...")
-    dest_dir = archive.library_dir()
-    expected_bytes = _parse_size_bytes(book.size)
-    guess_dest = dest_dir / _guess_dest_name(book)
-    stop_flag = threading.Event()
+        def _watch_download() -> None:
+            # 轮询磁盘文件大小估算下载进度（不侵入 client.py 核心）
+            started = False
+            while not stop_flag.is_set():
+                try:
+                    if guess_dest.exists():
+                        size = guess_dest.stat().st_size
+                        if size > 0:
+                            started = True
+                            if expected_bytes:
+                                pct = min(95, int(size / expected_bytes * 100))
+                                job.progress = pct / 100
+                                job.message = f"下载中 {pct}%（{size / 1048576:.1f}/{expected_bytes / 1048576:.1f} MB）"
+                            else:
+                                job.message = f"下载中（已收到 {size / 1048576:.1f} MB）"
+                except OSError:
+                    pass
+                if not started:
+                    job.message = "正在连接下载线路..."
+                time.sleep(2)
 
-    def _watch_progress() -> None:
-        # 通过轮询磁盘上目标文件的大小估算下载进度（client.download 内部逐块
-        # 落盘，这里不侵入 CLI 核心代码，只是外部观察文件增长情况）。
-        started = False
-        while not stop_flag.is_set():
-            try:
-                if guess_dest.exists():
-                    size = guess_dest.stat().st_size
-                    if size > 0:
-                        started = True
-                        if expected_bytes:
-                            pct = min(95, int(size / expected_bytes * 100))
-                            job.progress = pct / 100
-                            job.message = f"下载中 {pct}%（{size / 1048576:.1f}/{expected_bytes / 1048576:.1f} MB）"
-                        else:
-                            job.message = f"下载中（已收到 {size / 1048576:.1f} MB）"
-            except OSError:
-                pass
-            if not started:
-                job.message = "正在连接下载线路..."
-            time.sleep(2)
-
-    watcher = threading.Thread(target=_watch_progress, daemon=True)
-    watcher.start()
-    try:
-        path = client.download(book, dest_dir, max_rounds=3)
-    except Exception as e:  # noqa: BLE001
+        watcher = threading.Thread(target=_watch_download, daemon=True)
+        watcher.start()
+        try:
+            path = client.download(book, dest_dir, max_rounds=3)
+        except Exception as e:  # noqa: BLE001
+            stop_flag.set()
+            client.close()
+            log.warning("下载失败: %s: %s", type(e).__name__, e)
+            _set(job, status="failed", error=_friendly_download_error(e))
+            return
         stop_flag.set()
+
+        _set(job, message="正在写入本地书库...", progress=0.98)
+        if acc:
+            get_account_store().mark_used(acc)
         client.close()
-        log.warning("下载失败: %s: %s", type(e).__name__, e)
-        _set(job, status="failed", error=_friendly_download_error(e))
+
+        archived = archive.add(
+            book_id=book.book_id, hash_=book.hash, title=book.title, author=book.author,
+            year=book.year, language=book.language, fmt=book.format, file_path=path,
+            rating=book.rating,
+        )
+        archived_id = archived.id
+        file_path = path
+
+    # ---------- 上传阶段 ----------
+    if not _baidu_enabled():
+        # 未配置百度网盘 → 降级为仅本地下载
+        _set(job, status="success", progress=1.0, phase="done",
+             message="下载完成，可保存到本地（未配置百度网盘）", archived_id=archived_id)
         return
-    stop_flag.set()
 
-    _set(job, message="正在写入本地书库...", progress=0.98)
-    if acc:
-        get_account_store().mark_used(acc)
-    client.close()
+    _set(job, phase="uploading", progress=0.0, message="准备上传到百度网盘...")
+    try:
+        from zlibrary.baidupcs import BaiduPCSManager
+        from zlibrary.config import Config
 
-    archived = archive.add(
-        book_id=book.book_id, hash_=book.hash, title=book.title, author=book.author,
-        year=book.year, language=book.language, fmt=book.format, file_path=path,
-        rating=book.rating,
-    )
-    _set(job, status="success", progress=1.0, message="下载完成，可保存到本地", archived_id=archived.id)
+        cfg = Config.load()
+        mgr = BaiduPCSManager(cfg)
+        mgr.ensure_binary()
+        if not mgr.ensure_logged_in():
+            raise RuntimeError("百度网盘登录失效，请重新添加 cookies")
+
+        # 上传进度：解析子进程 stdout 关键行估算百分比
+        def _on_upload_output(line: str) -> None:
+            from zlibrary.baidupcs import _parse_upload_progress
+            pct = _parse_upload_progress(line)
+            if pct is not None:
+                job.progress = pct
+                job.message = f"上传到百度网盘 {int(pct * 100)}%..."
+
+        share_url = mgr.upload_and_share(
+            file_path, cfg.baidupcs.pan_dir,
+            on_output=_on_upload_output, period=cfg.baidupcs.share_period,
+        )
+        archive.set_share_url(book.book_id, book.hash, share_url)
+        _set(job, status="success", progress=1.0, phase="done",
+             message="下载并上传完成，可下载到本地或复制分享链接",
+             archived_id=archived_id, share_url=share_url)
+    except Exception as e:  # noqa: BLE001
+        log.warning("上传百度网盘失败: %s: %s", type(e).__name__, e)
+        # 上传失败不阻断主流程：仍可本地下载，只是没有分享链接
+        _set(job, status="success", progress=1.0, phase="done",
+             message=f"下载完成（上传百度网盘失败: {e}），可保存到本地",
+             archived_id=archived_id)
