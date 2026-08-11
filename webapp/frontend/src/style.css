@@ -196,6 +196,24 @@ th {
   }
 }
 
+/* 书库表格里的"复制百度链接"按钮（与下载/删除同列风格一致） */
+.btn-share {
+  background: #f5f5f5;
+  color: #333;
+  border: 1px solid #d0d0d0;
+  padding: 3px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.btn-share:hover {
+  background: #eaeaea;
+}
+.no-share {
+  color: #999;
+  font-size: 12px;
+}
+
 .book-row {
   display: flex;
   justify-content: space-between;
