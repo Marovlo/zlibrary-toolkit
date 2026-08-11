@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime as _dt
 import logging
 import os
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -54,6 +55,10 @@ class AccountStore:
     path: Path
     accounts: list[Account] = field(default_factory=list)
     limit: int = DEFAULT_DAILY_LIMIT
+    # webapp 场景下多个下载任务线程可能几乎同时对同一个账号调用 mark_used()，
+    # 不加锁的 `+= 1` 不是原子操作，并发下会漏计数；CLI 单线程不受影响，加锁
+    # 开销可忽略。不参与 dataclass 的 repr/相等比较。
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     @classmethod
     def load(cls, path: str | Path, limit: int = DEFAULT_DAILY_LIMIT) -> "AccountStore":
@@ -122,28 +127,31 @@ class AccountStore:
 
     def add_account(self, email: str, password: str, remaining: int | None = None) -> Account:
         """添加或更新账号并立即持久化。已存在同邮箱则更新密码和剩余次数。"""
-        existing = self.by_email(email)
-        if existing:
-            existing.password = password
-            if remaining is not None:
-                existing.remaining = remaining
+        with self._lock:
+            existing = self.by_email(email)
+            if existing:
+                existing.password = password
+                if remaining is not None:
+                    existing.remaining = remaining
+                self.save()
+                return existing
+            acc = Account(
+                email=email, password=password, downloads_today=0,
+                last_reset_date=_dt.date.today().isoformat(), remaining=remaining,
+            )
+            self.accounts.append(acc)
             self.save()
-            return existing
-        acc = Account(
-            email=email, password=password, downloads_today=0,
-            last_reset_date=_dt.date.today().isoformat(), remaining=remaining,
-        )
-        self.accounts.append(acc)
-        self.save()
-        return acc
+            return acc
 
     def mark_used(self, acc: Account) -> None:
-        acc.downloads_today += 1
-        if acc.remaining is not None:
-            acc.remaining = max(0, acc.remaining - 1)
-        self.save()
-        log.info("账号 %s 今日下载 %d/%d", acc.email, acc.downloads_today, self.limit)
+        with self._lock:
+            acc.downloads_today += 1
+            if acc.remaining is not None:
+                acc.remaining = max(0, acc.remaining - 1)
+            self.save()
+            log.info("账号 %s 今日下载 %d/%d", acc.email, acc.downloads_today, self.limit)
 
     def set_remaining(self, acc: Account, remaining: int) -> None:
-        acc.remaining = remaining
-        self.save()
+        with self._lock:
+            acc.remaining = remaining
+            self.save()

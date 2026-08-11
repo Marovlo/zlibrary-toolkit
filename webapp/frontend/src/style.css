@@ -267,6 +267,21 @@ th {
   border: 1px solid #dcdfe6;
 }
 
+.cancel-btn {
+  background: #fff;
+  color: #e74c3c;
+  border: 1px solid #f5c6c6;
+  white-space: nowrap;
+}
+
+.local-hits {
+  margin-bottom: 16px;
+}
+
+.local-hits .book-row {
+  border: 1px solid #e6f7e8;
+}
+
 form {
   display: flex;
   gap: 8px;

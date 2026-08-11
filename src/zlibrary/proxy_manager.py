@@ -21,6 +21,7 @@ import signal
 import socket
 import stat
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -128,6 +129,12 @@ class ProxyManager:
         self._proc: subprocess.Popen | None = None
         self.nodes: list[ProxyNode] = []
         self._rotated: set[str] = set()  # 本次会话已轮换过的节点，避免来回换同一批
+        # webapp 场景下会有多个线程（真实搜索/下载请求、后台健康监控）共用同一个
+        # ProxyManager 实例并发调用 rotate_node()；CLI 本身单线程不需要，但加这把
+        # 锁对 CLI 无副作用（几乎不产生等待）。保护的是"读节点列表决定顺序 -> 逐个
+        # 测活 -> 真的切换 selector"这一整套操作的原子性，避免两个线程同时轮换时
+        # 互相打乱对方选的节点、或对 `_rotated` 集合的并发读写产生竞争。
+        self._rotate_lock = threading.Lock()
         self._load_persisted_ports()  # 让status/stop 等不经过 start() 的命令也能用对端口
 
     # ---------- 0. 端口选择（避免跟用户机器上已有的 mihomo/clash 冲突） ----------
@@ -579,7 +586,19 @@ class ProxyManager:
 
         为避免每次轮换都全量测速，这里只做「快速验活」逐个尝试，第一个通的就用；
         轮换过的节点记在 `_rotated` 里不再重复。
+
+        用 `_rotate_lock` 把整个"读取当前节点 -> 逐个测活 -> 真的切换 selector"
+        串行化：webapp 场景下真实搜索线程、下载线程、后台健康监控线程可能几乎同时
+        都触发轮换，不加锁会导致几个线程同时读写 `_rotated`/并发调用 mihomo API
+        切换 selector，相互踩踏。代价是"某线程轮换进行中时，其它线程的轮换请求要
+        排队等待"，对私人面板这种低并发场景完全可接受；简化点在于：排队等待的
+        线程被唤醒后仍会按"从自己认知的旧 current 出发"重新走一轮测活，可能比
+        严格最优多测 1 个节点，但不会导致状态错乱，权衡合理。
         """
+        with self._rotate_lock:
+            return self._rotate_node_impl()
+
+    def _rotate_node_impl(self) -> str | None:
         try:
             nodes = self.list_nodes()
             current = self.current_node()
