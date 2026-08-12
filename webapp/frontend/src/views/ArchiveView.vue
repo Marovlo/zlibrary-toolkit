@@ -17,12 +17,37 @@ async function remove(id) {
 }
 
 async function copyShare(url, id) {
-  try {
-    await navigator.clipboard.writeText(url);
+  const ok = await writeClipboard(url);
+  if (ok) {
     copiedId.value = id;
     setTimeout(() => { if (copiedId.value === id) copiedId.value = null; }, 2000);
+  }
+}
+
+// 优先用 navigator.clipboard（HTTPS 下可用）；非安全上下文（如裸 IP 的 HTTP）
+// 退回 execCommand，保证明文访问时也能真正写入粘贴板。失败静默，不做弹窗。
+async function writeClipboard(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
   } catch (e) {
-    prompt("复制百度云盘链接：", url);
+    // 落到下面的兜底
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch (e) {
+    return false;
   }
 }
 
