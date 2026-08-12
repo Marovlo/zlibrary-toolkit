@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref } from "vue";
+import { onActivated, onDeactivated, onMounted, onUnmounted, ref } from "vue";
 import { api } from "../api";
 
 const accounts = ref([]);
@@ -7,9 +7,27 @@ const newEmail = ref("");
 const newPassword = ref("");
 const adding = ref(false);
 const errorMsg = ref("");
+let refreshTimer = null;
 
 async function refresh() {
-  accounts.value = await api.listAccounts();
+  try {
+    accounts.value = await api.listAccounts();
+  } catch (e) {
+    errorMsg.value = e.message;
+  }
+}
+
+function startAutoRefresh() {
+  if (refreshTimer) return;
+  refresh();
+  refreshTimer = setInterval(refresh, 10000);
+}
+
+function stopAutoRefresh() {
+  if (refreshTimer) {
+    clearInterval(refreshTimer);
+    refreshTimer = null;
+  }
 }
 
 async function addAccount() {
@@ -28,7 +46,10 @@ async function addAccount() {
   }
 }
 
-onMounted(refresh);
+onMounted(startAutoRefresh);
+onActivated(startAutoRefresh);
+onDeactivated(stopAutoRefresh);
+onUnmounted(stopAutoRefresh);
 </script>
 
 <template>
