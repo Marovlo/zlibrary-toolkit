@@ -107,6 +107,19 @@ class LoginResult:
     method: str = ""  # httpx | playwright
 
 
+@dataclass
+class RegistrationSession:
+    action: str
+    fields: dict[str, str]
+    code_field: str
+
+
+@dataclass
+class RegistrationResult:
+    ok: bool
+    error: str = ""
+
+
 class CloudflareError(Exception):
     """检测到无法自动通过的拦截。"""
 
@@ -332,6 +345,103 @@ class ZLibraryClient:
         if not allow_cf and self._is_cf(r):
             raise CloudflareError(f"访问被拦截: {url} -> {r.status_code}")
         return r
+
+    # ---------- 注册 ----------
+
+    @staticmethod
+    def _form_data(form) -> dict[str, str]:
+        data: dict[str, str] = {}
+        for inp in form.select("input[type='hidden']"):
+            name = inp.get("name")
+            if name:
+                data[name] = inp.get("value", "")
+        return data
+
+    @staticmethod
+    def _form_action(form, fallback: str) -> str:
+        action = form.get("action") or fallback
+        return action if action.startswith(("/", "http://", "https://")) else f"/{action}"
+
+    @staticmethod
+    def _registration_blocked(text: str) -> bool:
+        low = text[:12000].lower()
+        return any(marker in low for marker in (
+            "recaptcha", "hcaptcha", "captcha", "verify you are human", "人机验证",
+        ))
+
+    @classmethod
+    def _find_code_form(cls, soup):
+        for form in soup.find_all("form"):
+            for inp in form.find_all("input"):
+                name = (inp.get("name") or "").lower()
+                if any(marker in name for marker in ("code", "confirm", "verification", "verify")):
+                    return form, inp.get("name")
+        return None, None
+
+    def begin_registration(self, email: str, password: str) -> RegistrationSession:
+        """提交注册表单并返回邮箱验证码确认表单。"""
+        try:
+            page = self._get("/registration")
+        except CloudflareError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(f"无法访问注册页: {e}") from e
+        soup = BeautifulSoup(page.text, "html.parser")
+        form = soup.find("form")
+        if not form:
+            raise RuntimeError("注册页没有找到注册表单，网站页面可能已变更")
+        fields = self._form_data(form)
+        fields["email"] = email
+        fields["password"] = password
+        if form.find("input", attrs={"name": "password_confirmation"}):
+            fields["password_confirmation"] = password
+        elif form.find("input", attrs={"name": "password_confirm"}):
+            fields["password_confirm"] = password
+        name_input = form.find("input", attrs={"name": "name"})
+        if name_input is not None:
+            fields["name"] = email.split("@", 1)[0]
+        action = self._form_action(form, "/registration")
+        try:
+            response = self._post(action, data=fields)
+        except CloudflareError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(f"注册请求失败: {e}") from e
+        if self._registration_blocked(response.text):
+            raise RuntimeError("注册流程要求 CAPTCHA 或人工人机验证，已停止，不自动绕过")
+        confirm_soup = BeautifulSoup(response.text, "html.parser")
+        confirm_form, code_field = self._find_code_form(confirm_soup)
+        if not confirm_form or not code_field:
+            low = response.text[:12000].lower()
+            if any(marker in low for marker in ("already registered", "已经注册", "已存在", "invalid email", "邮箱无效")):
+                raise RuntimeError("注册被拒绝：邮箱可能已注册或格式无效")
+            raise RuntimeError("注册提交后没有找到邮箱验证码表单，网站流程可能已变更")
+        return RegistrationSession(
+            action=self._form_action(confirm_form, str(response.url)),
+            fields=self._form_data(confirm_form),
+            code_field=code_field,
+        )
+
+    def finish_registration(self, session: RegistrationSession, code: str) -> RegistrationResult:
+        """提交邮箱验证码，返回站点是否接受该验证码。"""
+        fields = dict(session.fields)
+        fields[session.code_field] = code
+        try:
+            response = self._post(session.action, data=fields)
+        except CloudflareError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            return RegistrationResult(ok=False, error=f"验证码提交失败: {e}")
+        if self._registration_blocked(response.text):
+            return RegistrationResult(ok=False, error="验证码确认流程要求 CAPTCHA 或人工验证，已停止")
+        low = response.text[:12000].lower()
+        if any(marker in low for marker in ("验证码错误", "确认码错误", "invalid code", "expired code", "code expired")):
+            return RegistrationResult(ok=False, error="邮箱验证码无效或已过期")
+        soup = BeautifulSoup(response.text, "html.parser")
+        next_form, _ = self._find_code_form(soup)
+        if next_form is not None and "/registration" in response.url.path:
+            return RegistrationResult(ok=False, error="验证码未被接受")
+        return RegistrationResult(ok=True)
 
     # ---------- 登录 ----------
 

@@ -79,6 +79,14 @@ else
     info "baidu.yaml 已存在，跳过生成"
 fi
 
+if [ ! -f mail.yaml ]; then
+    cp mail-example.yaml mail.yaml
+    chmod 600 mail.yaml
+    info "已生成空的 mail.yaml，请填写 QQ IMAP 授权码后使用 zlib register-account"
+else
+    info "mail.yaml 已存在，跳过生成"
+fi
+
 echo
 info "安装完成！接下来："
 echo "  0. source .venv/bin/activate   # 每次新开终端都需要先执行这一步"

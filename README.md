@@ -10,7 +10,7 @@ cd zlibrary
 ./install.sh
 ```
 
-`install.sh` 会自动创建虚拟环境、安装依赖、生成 `config.yaml`/`accounts.yaml`
+`install.sh` 会自动创建虚拟环境、安装依赖、生成 `config.yaml`/`accounts.yaml`/`mail.yaml`
 （从模板复制）。**mihomo 二进制不需要装**——本仓库自带 `vendor/` 目录下的预编译
 二进制，首次运行 `zlib` 命令时会自动解压出来，全程不联网、不需要能访问 GitHub
 （详见下方"mihomo 二进制"一节）。
@@ -20,14 +20,30 @@ cd zlibrary
 1. **config.yaml** — 主配置。`install.sh` 会从 `config.example.yaml` 生成，
    **必须编辑其中的 `subscription_url` 为你自己的订阅链接**才能使用。
 2. **accounts.yaml** — Z-Library 账号池，`install.sh` 会生成一个空模板。
-   推荐用命令添加（会先做真实登录测试，成功才写入，不会存入错误密码）：
+   推荐用命令添加已有账号（会先做真实登录测试，成功才写入，不会存入错误密码）：
 
 ```bash
 source .venv/bin/activate
 zlib add-account your_email@example.com your_password
 ```
 
-也可以多个账号（每号每日10 本，自动轮换，额度用尽自动切下一个）。
+   也可以用自己的 `@marovlo.cloud` Catch-all 邮箱自动注册并验证新账号：
+
+```bash
+zlib register-account
+# 或指定邮箱本地部分：
+zlib register-account --email test-001@marovlo.cloud
+```
+
+   注册命令会从根目录 `mail.yaml` 读取 QQ 邮箱 IMAP 配置，等待转发的确认码；
+   不提供密码时可交互输入，直接回车则自动生成随机密码。只有注册、邮箱验证和
+   最终登录都成功后才会写入 `accounts.yaml`。不自动绕过 CAPTCHA 或其他人机验证。
+
+3. **mail.yaml** — QQ 邮箱 IMAP 配置，仅用于自动读取 `@marovlo.cloud` Catch-all
+   转发的注册验证码。`install.sh` 会从 `mail-example.yaml` 生成空模板；请填写
+   QQ 邮箱授权码（不是网页登录密码），并确保文件权限为 `600`。该文件已被 Git 忽略。
+
+也可以添加多个账号（每号每日 10 本，自动轮换，额度用尽自动切下一个）。
 
 ## 使用
 

@@ -1,0 +1,122 @@
+"""register-account 的离线自测，不访问真实 QQ 或 Z-Library。"""
+from __future__ import annotations
+
+import email
+import imaplib
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from zlibrary.client import ZLibraryClient
+from zlibrary.mail import MailConfig, MailError, VerificationMailbox
+
+
+RAW_CODE_MAIL = """From: Library <no-reply@z-lib.hn>
+To: test-001@marovlo.cloud
+Subject: =?utf-8?b?5oKo55qE56Gu6K6k56CB77ya?=
+Date: Wed, 12 Aug 2026 10:07:39 +0300
+Content-Type: text/html; charset=utf-8
+
+<html><body><p>您的确认码：</p><h1>9364</h1></body></html>
+""".encode()
+
+
+class FakeMailbox:
+    def __init__(self, messages: list[bytes]):
+        self.messages = messages
+        self.selected = False
+        self.logged_out = False
+
+    def login(self, username: str, password: str):
+        assert username == "test@qq.com"
+        assert password == "secret"
+        return "OK", [b"Success"]
+
+    def select(self, mailbox: str, readonly: bool = False):
+        assert mailbox == "INBOX"
+        assert readonly is True
+        self.selected = True
+        return "OK", [str(len(self.messages)).encode()]
+
+    def uid(self, command: str, *args):
+        if command == "search":
+            return "OK", [b"1"]
+        if command == "fetch":
+            return "OK", [(b"header", self.messages[0])]
+        raise AssertionError(command)
+
+    def logout(self):
+        self.logged_out = True
+        return "OK", [b"logout"]
+
+
+def test_extract_code_from_forwarded_html() -> None:
+    cfg = MailConfig(username="test@qq.com", password="secret")
+    mailbox = VerificationMailbox(cfg)
+    fake = FakeMailbox([RAW_CODE_MAIL])
+    with patch.object(imaplib, "IMAP4_SSL", return_value=fake):
+        assert mailbox.wait_for_code(
+            "test-001@marovlo.cloud",
+            seen_uids=set(),
+            not_before=datetime(2026, 8, 12, 0, tzinfo=timezone.utc),
+            timeout=1,
+        ) == "9364"
+    assert fake.logged_out
+
+
+def test_old_uid_is_ignored() -> None:
+    cfg = MailConfig(username="test@qq.com", password="secret")
+    mailbox = VerificationMailbox(cfg)
+    fake = FakeMailbox([RAW_CODE_MAIL])
+    with patch.object(imaplib, "IMAP4_SSL", return_value=fake):
+        with patch.object(mailbox, "_search", return_value=[b"1"]):
+            try:
+                mailbox.wait_for_code("test-001@marovlo.cloud", {"1"}, timeout=0.01)
+            except MailError as exc:
+                assert "超时" in str(exc)
+            else:
+                raise AssertionError("旧邮件不应被作为验证码返回")
+
+
+def test_registration_form_data_is_dynamic() -> None:
+    client = ZLibraryClient("https://example.test", None, "test-agent")
+    registration_html = """
+    <form action="/registration" method="post">
+      <input type="hidden" name="csrf_token" value="abc">
+      <input type="email" name="email">
+      <input type="password" name="password">
+      <input type="text" name="name">
+    </form>
+    """
+    confirmation_html = """
+    <form action="/registration/confirm" method="post">
+      <input type="hidden" name="csrf_token" value="def">
+      <input name="confirmation_code">
+    </form>
+    """
+    class Response:
+        def __init__(self, text: str, url: str):
+            self.text = text
+            self.url = url
+
+    with patch.object(client, "_get", return_value=Response(registration_html, "https://example.test/registration")), \
+         patch.object(client, "_post", return_value=Response(confirmation_html, "https://example.test/registration")) as post:
+        session = client.begin_registration("test@example.com", "password")
+    assert session.code_field == "confirmation_code"
+    assert session.fields == {"csrf_token": "def"}
+    assert post.call_args.kwargs["data"] == {
+        "csrf_token": "abc",
+        "email": "test@example.com",
+        "password": "password",
+        "name": "test",
+    }
+
+
+if __name__ == "__main__":
+    test_extract_code_from_forwarded_html()
+    test_old_uid_is_ignored()
+    test_registration_form_data_is_dynamic()
+    print("register-account 离线自测通过")

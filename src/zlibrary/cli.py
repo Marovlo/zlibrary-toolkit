@@ -21,14 +21,18 @@ from __future__ import annotations
 
 import logging
 import re
+import secrets
+import string
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import click
 
 from .client import IpQuotaExceeded, SearchServiceUnavailable, SiteRejected
 from .config import Config, project_root
+from .mail import MailConfig, MailError, VerificationMailbox
 from .site_checker import check_direct, check_via_proxy
 
 log = logging.getLogger("zlib")
@@ -445,6 +449,105 @@ def add_account(email: str, password: str | None) -> None:
     click.echo(f"✓ 账号 {email} 已{'更新' if existed else '添加'}到账号池（{path}）")
 
 
+_REGISTER_DOMAIN = "marovlo.cloud"
+_REGISTER_LOCAL_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._+-]{0,62}[A-Za-z0-9])?\\Z")
+
+
+def _registration_email(value: str | None, existing: set[str]) -> str:
+    if value:
+        raw = value.strip()
+        if "@" in raw:
+            local, domain = raw.rsplit("@", 1)
+            if domain.casefold() != _REGISTER_DOMAIN:
+                raise click.ClickException(f"注册邮箱必须使用 @{_REGISTER_DOMAIN} 域名")
+        else:
+            local = raw
+        if not _REGISTER_LOCAL_RE.fullmatch(local):
+            raise click.ClickException("注册邮箱的本地部分格式无效")
+        address = f"{local}@{_REGISTER_DOMAIN}"
+        if address.casefold() in existing:
+            raise click.ClickException(f"账号已存在，拒绝重复注册: {address}")
+        return address
+
+    for _ in range(10):
+        local = f"test-{secrets.token_hex(6)}"
+        address = f"{local}@{_REGISTER_DOMAIN}"
+        if address.casefold() not in existing:
+            return address
+    raise click.ClickException("无法生成不重复的测试邮箱地址")
+
+
+def _registration_password(value: str | None) -> tuple[str, bool]:
+    if value is not None:
+        if value:
+            return value, False
+        raise click.ClickException("--password 不能是空值")
+    typed = click.prompt("Z-Library 密码（直接回车自动生成）", hide_input=True, default="", show_default=False)
+    if typed:
+        confirmation = click.prompt("确认密码", hide_input=True)
+        if typed != confirmation:
+            raise click.ClickException("两次输入的密码不一致")
+        return typed, False
+    alphabet = string.ascii_letters + string.digits + "-_!@#$%^&*"
+    return "".join(secrets.choice(alphabet) for _ in range(24)), True
+
+
+@cli.command("register-account")
+@click.option("--email", "email_value", default=None, help="邮箱地址或 @marovlo.cloud 前的本地部分")
+@click.option("--password", default=None, help="Z-Library 密码；不提供则隐藏询问或自动生成")
+@click.option("--mail-timeout", type=click.FloatRange(min=1), default=None, show_default=False,
+              help="等待验证码的最长秒数（默认读取 mail.yaml）")
+def register_account(email_value: str | None, password: str | None, mail_timeout: float | None) -> None:
+    """注册一个 Z-Library 账号并通过邮箱验证码完成验证。"""
+    from .accounts import AccountStore, DEFAULT_DAILY_LIMIT
+
+    try:
+        mail_cfg = MailConfig.load()
+        cfg = Config.load()
+        accounts_path = project_root() / "accounts.yaml"
+        store = AccountStore.load(accounts_path, limit=DEFAULT_DAILY_LIMIT)
+        existing = {a.email.casefold() for a in store.accounts}
+        email = _registration_email(email_value, existing)
+        password, generated_password = _registration_password(password)
+        mailbox = VerificationMailbox(mail_cfg)
+        seen_uids = mailbox.snapshot(email)
+        not_before = datetime.now(timezone.utc)
+    except (MailError, FileNotFoundError, OSError, ValueError, TypeError, KeyError) as e:
+        raise click.ClickException(str(e)) from e
+
+    click.echo(f"注册邮箱: {email}")
+    if generated_password:
+        click.echo(f"自动生成的 Z-Library 密码（请保存）: {password}")
+
+    client = None
+    try:
+        site, proxy_url, pm = _ensure_access(cfg)
+        client = _make_client(cfg, site, proxy_url, pm)
+        log.info("提交 Z-Library 注册请求")
+        registration = client.begin_registration(email, password)
+        click.echo("注册请求已提交，等待邮箱验证码...")
+        code = mailbox.wait_for_code(email, seen_uids, not_before, timeout=mail_timeout)
+        click.echo("已收到验证码，正在完成注册...")
+        result = client.finish_registration(registration, code)
+        if not result.ok:
+            raise click.ClickException(f"邮箱验证失败: {result.error}")
+        login_result = client.login(email, password)
+        if not login_result.ok:
+            raise click.ClickException(f"注册完成但登录验证失败: {login_result.error}")
+    except MailError as e:
+        raise click.ClickException(str(e)) from e
+    except click.ClickException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise click.ClickException(f"注册失败: {e}") from e
+    finally:
+        if client is not None:
+            client.close()
+
+    store.add_account(email, password, remaining=login_result.remaining)
+    click.echo(f"✓ 注册并登录验证成功，账号已添加到账号池（{accounts_path}）")
+
+
 def _write_config_value(path: Path, key: str, value: str) -> None:
     """把config.yaml 顶层某个字符串字段替换成新值，只改这一行，保留其余内容
     （注释、其它字段）不变。字段不存在则追加到文件末尾。"""
@@ -657,7 +760,8 @@ Z-Library 一键搜索下载工具 - 详细说明
   zlib search <书名>                搜索书籍
   zlib download <书名>              搜索并列出候选下载列表，手动选择序号下载
   zlib download <书名> -y           自动下载排序最优的候选，不进入交互选择
-  zlib add-account <邮箱> [密码]     添加/更新账号（先真实登录测试，成功才写入 accounts.yaml）
+  zlib add-account <邮箱> [密码]     添加/更新已有账号（先真实登录测试，成功才写入 accounts.yaml）
+  zlib register-account              用 @marovlo.cloud Catch-all 邮箱注册并验证新账号
   zlib add-baidu-cookies [cookies]   添加百度网盘凭证（先验证能否登录，成功才写入 baidu.yaml）
   zlib set-subscription <链接>      设置/更新代理订阅链接，并立即验证是否有效
   zlib status                       查看代理/登录态/百度网盘状态

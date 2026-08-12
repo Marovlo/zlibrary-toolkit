@@ -1,0 +1,12 @@
+# QQ 邮箱 IMAP 配置。
+# password 填 QQ 邮箱生成的 IMAP 授权码，不是网页登录密码。
+# 复制为 mail.yaml 后填写；mail.yaml 已加入 .gitignore，不会提交到仓库。
+imap:
+  host: imap.qq.com
+  port: 993
+  username: "your@qq.com"
+  password: ""
+  mailbox: "INBOX"
+  connect_timeout: 10
+  poll_interval: 3
+  wait_timeout: 120

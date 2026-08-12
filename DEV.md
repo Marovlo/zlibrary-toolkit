@@ -19,8 +19,9 @@
 
 ```
 src/zlibrary/
-├── cli.py              # CLI 入口（search/download/set-subscription/status/stop/logout/add-account/upgrade-mihomo/help）
+├── cli.py              # CLI 入口（search/download/set-subscription/status/stop/logout/add-account/register-account/upgrade-mihomo/help）
 ├── config.py            # 配置加载
+├── mail.py              # QQ IMAP Catch-all 验证码读取
 ├── subscription.py      # 订阅拉取 + 解析
 ├── proxy_manager.py     # mihomo 全生命周期（引导/端口选择/升级/测速选优/节点轮换）
 ├── challenge.py         # 站点浏览器校验（SHA-1 PoW）求解

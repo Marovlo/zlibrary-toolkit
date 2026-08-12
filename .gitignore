@@ -12,6 +12,7 @@ dist/
 data/
 accounts.yaml
 baidu.yaml
+mail.yaml
 config.yaml
 clash-config.yaml
 
@@ -26,4 +27,4 @@ webapp/frontend/dist/
 
 # --- 说明 ---
 # vendor/ 需要提交（随包自带的 mihomo 二进制，用于解决"先鸡先蛋"的联网引导问题）
-# config.example.yaml / accounts.example.yaml 需要提交（不含真实密钥的模板）
+# config.example.yaml / accounts.example.yaml / mail-example.yaml 需要提交（不含真实密钥的模板）
