@@ -161,7 +161,9 @@ class VerificationMailbox:
                         continue
                     raw = b"".join(item[1] for item in fetched if isinstance(item, tuple))
                     message = email.message_from_bytes(raw)
-                    if not self._is_candidate(message, recipient, start):
+                    # UID 快照已经排除了注册前的旧邮件。邮件 Date 由转发链路生成，
+                    # 可能存在时区/投递延迟，不再用严格 Date 比较误过滤刚到的验证码。
+                    if not self._is_candidate(message, recipient, start, check_date=False):
                         continue
                     code = self._extract_code(message)
                     if code:
@@ -175,7 +177,13 @@ class VerificationMailbox:
         raise MailTimeout(f"等待验证码超时（收件地址: {recipient}）")
 
     @classmethod
-    def _is_candidate(cls, message: email.message.Message, recipient: str, not_before: datetime) -> bool:
+    def _is_candidate(
+        cls,
+        message: email.message.Message,
+        recipient: str,
+        not_before: datetime,
+        check_date: bool = True,
+    ) -> bool:
         headers = [message.get(name, "") for name in ("To", "Delivered-To", "X-Original-To", "Envelope-To")]
         addresses = {addr.casefold() for _, addr in getaddresses(headers) if addr}
         # QQ 转发的裸 To 头有时会被 email.parser 当成空地址，补充标准邮箱地址匹配。
@@ -188,16 +196,18 @@ class VerificationMailbox:
         subject = cls._decode_header(message.get("Subject", ""))
         if not any(marker.casefold() in subject.casefold() for marker in cls._SUBJECT_MARKERS):
             return False
-        date_value = message.get("Date")
-        if date_value:
-            try:
-                message_date = parsedate_to_datetime(date_value)
-                if message_date.tzinfo is None:
-                    message_date = message_date.replace(tzinfo=timezone.utc)
-                if message_date < not_before:
-                    return False
-            except (TypeError, ValueError, OverflowError):
-                pass
+        if check_date:
+            date_value = message.get("Date")
+            if date_value:
+                try:
+                    message_date = parsedate_to_datetime(date_value)
+                    if message_date.tzinfo is None:
+                        message_date = message_date.replace(tzinfo=timezone.utc)
+                    # 允许转发链路最多 10 分钟的时钟/投递偏差。
+                    if message_date.timestamp() < not_before.timestamp() - 600:
+                        return False
+                except (TypeError, ValueError, OverflowError):
+                    pass
         return True
 
     @classmethod

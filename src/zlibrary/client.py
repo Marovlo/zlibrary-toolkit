@@ -292,7 +292,8 @@ class ZLibraryClient:
                 self._client.cookies.set(name, value, domain=domain, path=path or "/")
 
     def _request(self, method: str, url: str, *, params: dict | None = None,
-                 data: dict | None = None, headers: dict | None = None,
+                 data: dict | None = None, files: dict | None = None,
+                 headers: dict | None = None,
                  allow_challenge_fail: bool = False) -> httpx.Response:
         """统一请求入口：自动解 PoW 挑战 + 传输层报错自动重试/换节点。
 
@@ -304,7 +305,7 @@ class ZLibraryClient:
         challenge_rounds = 0
         while True:
             try:
-                r = client.request(method, url, params=params, data=data, headers=headers)
+                r = client.request(method, url, params=params, data=data, files=files, headers=headers)
             except (httpx.TransportError, httpx.RemoteProtocolError) as e:
                 transport_tries += 1
                 if transport_tries > MAX_TRANSPORT_RETRIES or not self._handle_transport_error(
@@ -346,6 +347,14 @@ class ZLibraryClient:
             raise CloudflareError(f"访问被拦截: {url} -> {r.status_code}")
         return r
 
+    def _post_multipart(self, path: str, *, data: dict, allow_cf: bool = False) -> httpx.Response:
+        url = path if path.startswith("http") else urljoin(self.site + "/", path.lstrip("/"))
+        files = {key: (None, str(value)) for key, value in data.items()}
+        r = self._request("POST", url, files=files, allow_challenge_fail=allow_cf)
+        if not allow_cf and self._is_cf(r):
+            raise CloudflareError(f"访问被拦截: {url} -> {r.status_code}")
+        return r
+
     # ---------- 注册 ----------
 
     @staticmethod
@@ -379,7 +388,7 @@ class ZLibraryClient:
         return None, None
 
     def begin_registration(self, email: str, password: str) -> RegistrationSession:
-        """提交注册表单并返回邮箱验证码确认表单。"""
+        """触发站点发送邮箱验证码，返回后续确认表单所需字段。"""
         try:
             page = self._get("/registration")
         except CloudflareError:
@@ -393,6 +402,14 @@ class ZLibraryClient:
         fields = self._form_data(form)
         fields["email"] = email
         fields["password"] = password
+        # 官网脚本会把 jsRXValue 从 0 改成页面中的动态值；验证码接口
+        # 会用它判断请求是否来自已执行页面脚本的正常注册流程。
+        rx_match = re.search(
+            r"getElementById\(['\"]jsRXValue['\"]\)\.value\s*=\s*([0-9]+)",
+            page.text,
+        )
+        if rx_match:
+            fields["rx"] = rx_match.group(1)
         if form.find("input", attrs={"name": "password_confirmation"}):
             fields["password_confirmation"] = password
         elif form.find("input", attrs={"name": "password_confirm"}):
@@ -400,26 +417,26 @@ class ZLibraryClient:
         name_input = form.find("input", attrs={"name": "name"})
         if name_input is not None:
             fields["name"] = email.split("@", 1)[0]
-        action = self._form_action(form, "/registration")
         try:
-            response = self._post(action, data=fields)
+            # 官网通过 JS FormData 调用此 JSON 接口发送验证码；普通
+            # application/x-www-form-urlencoded 会被站点判定为未启用 JS。
+            response = self._post_multipart("/papi/user/verification/send-code", data=fields)
         except CloudflareError:
             raise
         except Exception as e:  # noqa: BLE001
-            raise RuntimeError(f"注册请求失败: {e}") from e
+            raise RuntimeError(f"注册验证码请求失败: {e}") from e
         if self._registration_blocked(response.text):
             raise RuntimeError("注册流程要求 CAPTCHA 或人工人机验证，已停止，不自动绕过")
-        confirm_soup = BeautifulSoup(response.text, "html.parser")
-        confirm_form, code_field = self._find_code_form(confirm_soup)
-        if not confirm_form or not code_field:
-            low = response.text[:12000].lower()
-            if any(marker in low for marker in ("already registered", "已经注册", "已存在", "invalid email", "邮箱无效")):
-                raise RuntimeError("注册被拒绝：邮箱可能已注册或格式无效")
-            raise RuntimeError("注册提交后没有找到邮箱验证码表单，网站流程可能已变更")
+        try:
+            result = response.json()
+        except ValueError as e:
+            raise RuntimeError("注册验证码接口返回了无法解析的响应") from e
+        if not result.get("success"):
+            raise RuntimeError(str(result.get("error") or "站点未接受注册验证码请求"))
         return RegistrationSession(
-            action=self._form_action(confirm_form, str(response.url)),
-            fields=self._form_data(confirm_form),
-            code_field=code_field,
+            action="/registration",
+            fields=fields,
+            code_field="verifyCode",
         )
 
     def finish_registration(self, session: RegistrationSession, code: str) -> RegistrationResult:
@@ -437,9 +454,12 @@ class ZLibraryClient:
         low = response.text[:12000].lower()
         if any(marker in low for marker in ("验证码错误", "确认码错误", "invalid code", "expired code", "code expired")):
             return RegistrationResult(ok=False, error="邮箱验证码无效或已过期")
-        soup = BeautifulSoup(response.text, "html.parser")
-        next_form, _ = self._find_code_form(soup)
-        if next_form is not None and "/registration" in response.url.path:
+        # 站点接受验证码后有时仍返回原注册表单（表单为空、没有错误），
+        # 不能把这种响应误判为失败；后续 login() 会做最终权威验证。
+        error = BeautifulSoup(response.text, "html.parser").select_one(
+            ".validation-error, .form-error, .alert-danger"
+        )
+        if error and error.get_text(" ", strip=True):
             return RegistrationResult(ok=False, error="验证码未被接受")
         return RegistrationResult(ok=True)
 

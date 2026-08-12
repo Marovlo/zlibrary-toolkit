@@ -91,31 +91,46 @@ def test_registration_form_data_is_dynamic() -> None:
       <input type="text" name="name">
     </form>
     """
-    confirmation_html = """
-    <form action="/registration/confirm" method="post">
-      <input type="hidden" name="csrf_token" value="def">
-      <input name="confirmation_code">
-    </form>
-    """
     class Response:
         def __init__(self, text: str, url: str):
             self.text = text
             self.url = url
 
+        def json(self):
+            return {"success": 1}
+
     with patch.object(client, "_get", return_value=Response(registration_html, "https://example.test/registration")), \
-         patch.object(client, "_post", return_value=Response(confirmation_html, "https://example.test/registration")) as post:
+         patch.object(client, "_post_multipart", return_value=Response("{}", "https://example.test/papi/user/verification/send-code")) as post:
         session = client.begin_registration("test@example.com", "password")
-    assert session.code_field == "confirmation_code"
-    assert session.fields == {"csrf_token": "def"}
-    assert post.call_args.kwargs["data"] == {
+    assert session.code_field == "verifyCode"
+    assert session.action == "/registration"
+    assert session.fields == {
         "csrf_token": "abc",
         "email": "test@example.com",
         "password": "password",
         "name": "test",
     }
+    assert post.call_args.kwargs["data"] == session.fields
+
+
+def test_blank_registration_form_response_is_pending_success() -> None:
+    client = ZLibraryClient("https://example.test", None, "test-agent")
+    class Response:
+        text = '<form id="registrationForm" class="require-verification"></form>'
+        url = "https://example.test/registration"
+    from zlibrary.client import RegistrationSession
+    session = RegistrationSession("/registration", {}, "verifyCode")
+    with patch.object(client, "_post", return_value=Response()):
+        result = client.finish_registration(session, "9364")
+    assert result.ok
 
 
 if __name__ == "__main__":
+    test_extract_code_from_forwarded_html()
+    test_old_uid_is_ignored()
+    test_registration_form_data_is_dynamic()
+    test_blank_registration_form_response_is_pending_success()
+    print("register-account 离线自测通过")
     test_extract_code_from_forwarded_html()
     test_old_uid_is_ignored()
     test_registration_form_data_is_dynamic()
