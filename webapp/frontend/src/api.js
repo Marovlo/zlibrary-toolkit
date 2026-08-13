@@ -26,6 +26,9 @@ async function request(method, path, body, { signal } = {}) {
 
 export const api = {
   listAccounts: () => request("GET", "/accounts"),
+  getAccountSummary: () => request("GET", "/accounts/summary"),
+  startAccountRegistration: () => request("POST", "/accounts/register"),
+  getAccountRegistration: (jobId) => request("GET", `/accounts/register/${jobId}`),
   addAccount: (email, password) => request("POST", "/accounts", { email, password }),
   search: (query, page, account_email, force_refresh = false, signal) =>
     request("POST", "/search", { query, page, account_email, force_refresh }, { signal }),

@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import archive
+from . import archive, quota
 from .accounts_store import get_account_store
 from .sessions import get_logged_in_client
 
@@ -126,6 +126,9 @@ def _run(job: Job, payload: dict) -> None:
             _set(job, status="failed", error=str(e))
             return
 
+        # 额度检查只读本地账号池，并异步执行，不阻塞当前下载。
+        if acc:
+            quota.check_in_background()
         _set(job, message="正在获取下载链接...")
         dest_dir = archive.library_dir()
         expected_bytes = _parse_size_bytes(book.size)
@@ -168,6 +171,7 @@ def _run(job: Job, payload: dict) -> None:
         _set(job, message="正在写入本地书库...", progress=0.98)
         if acc:
             get_account_store().mark_used(acc)
+            quota.check_in_background()
         client.close()
 
         archived = archive.add(

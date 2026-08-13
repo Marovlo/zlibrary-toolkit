@@ -8,7 +8,27 @@ class AccountInfo(BaseModel):
     downloads_today: int
     limit: int
     remaining: int | None
+    effective_remaining: int
     available: bool
+
+
+class AccountSummary(BaseModel):
+    total_remaining: int
+    available_accounts: int
+    threshold: int
+    low_balance: bool
+    registration_job_id: str | None = None
+
+
+class RegistrationJobStatus(BaseModel):
+    id: str
+    status: str
+    phase: str
+    message: str
+    email: str
+    error: str
+    created_at: float
+    updated_at: float
 
 
 class AddAccountRequest(BaseModel):

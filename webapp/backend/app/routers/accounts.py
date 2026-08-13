@@ -5,7 +5,8 @@ from fastapi import APIRouter, HTTPException
 from ..access import access_state
 from ..accounts_store import get_account_store
 from ..errors import friendly_error
-from ..schemas import AccountInfo, AddAccountRequest
+from .. import quota, registration_jobs
+from ..schemas import AccountInfo, AccountSummary, AddAccountRequest, RegistrationJobStatus
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
@@ -14,7 +15,8 @@ def _to_info(a, limit: int) -> AccountInfo:
     a.maybe_reset()
     return AccountInfo(
         email=a.email, downloads_today=a.downloads_today, limit=limit,
-        remaining=a.remaining, available=a.available(limit),
+        remaining=a.remaining, effective_remaining=a.effective_remaining(limit),
+        available=a.available(limit),
     )
 
 
@@ -22,6 +24,32 @@ def _to_info(a, limit: int) -> AccountInfo:
 def list_accounts() -> list[AccountInfo]:
     store = get_account_store()
     return [_to_info(a, store.limit) for a in store.accounts]
+
+
+@router.get("/summary", response_model=AccountSummary)
+def account_summary() -> AccountSummary:
+    current = registration_jobs.current()
+    summary = quota.snapshot()
+    return AccountSummary(
+        total_remaining=summary.total_remaining,
+        available_accounts=summary.available_accounts,
+        threshold=summary.threshold,
+        low_balance=summary.low_balance,
+        registration_job_id=current.id if current else None,
+    )
+
+
+@router.post("/register", response_model=RegistrationJobStatus)
+def start_registration() -> RegistrationJobStatus:
+    return RegistrationJobStatus(**registration_jobs.start().public())
+
+
+@router.get("/register/{job_id}", response_model=RegistrationJobStatus)
+def registration_status(job_id: str) -> RegistrationJobStatus:
+    job = registration_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "注册任务不存在")
+    return RegistrationJobStatus(**job.public())
 
 
 @router.post("", response_model=AccountInfo)

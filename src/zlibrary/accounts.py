@@ -46,11 +46,15 @@ class Account:
             return True
         return False
 
-    def available(self, limit: int = DEFAULT_DAILY_LIMIT) -> bool:
+    def effective_remaining(self, limit: int = DEFAULT_DAILY_LIMIT) -> int:
+        """返回本地可用的剩余额度估计；每个账号最多按每日上限计算。"""
         self.maybe_reset()
         if self.remaining is not None:
-            return self.remaining > 0
-        return self.downloads_today < limit
+            return max(0, min(self.remaining, limit))
+        return max(0, limit - self.downloads_today)
+
+    def available(self, limit: int = DEFAULT_DAILY_LIMIT) -> bool:
+        return self.effective_remaining(limit) > 0
 
 
 @dataclass
@@ -190,7 +194,8 @@ class AccountStore:
             if account is None:
                 account = Account(
                     email=email, password=password, downloads_today=0,
-                    last_reset_date=_dt.date.today().isoformat(), remaining=remaining,
+                    last_reset_date=_dt.date.today().isoformat(),
+                    remaining=DEFAULT_DAILY_LIMIT if remaining is None else remaining,
                 )
                 fresh.append(account)
             else:

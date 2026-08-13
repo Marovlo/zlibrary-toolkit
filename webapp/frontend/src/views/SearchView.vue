@@ -144,7 +144,7 @@ onMounted(loadAccounts);
       <select v-model="accountEmail" :disabled="loading">
         <option value="">匿名</option>
         <option v-for="a in accounts" :key="a.email" :value="a.email" :disabled="!a.available">
-          {{ a.email }}（{{ a.available ? `剩余${a.remaining ?? a.limit - a.downloads_today}` : "额度已尽" }}）
+          {{ a.email }}（{{ a.available ? `剩余${a.remaining ?? Math.max(0, a.limit - a.downloads_today)}` : "额度已尽" }}）
         </option>
       </select>
       <button type="submit" :disabled="loading" class="search-btn">
