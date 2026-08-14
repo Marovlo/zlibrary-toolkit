@@ -66,10 +66,7 @@ def _ensure_access(cfg: Config, preferred_site: str | None = None):
         raise click.ClickException("没有配置可用的 Z-Library 站点")
     from .proxy_manager import ProxyManager
     pm = ProxyManager(cfg)
-    persisted_site = pm._load_state().get("site")
-    sticky_site = preferred_site if preferred_site in configured_sites else persisted_site
-    if sticky_site not in configured_sites:
-        sticky_site = None
+    sticky_site = preferred_site if preferred_site in configured_sites else None
     sites = ([sticky_site] if sticky_site else []) + [
         site for site in configured_sites if site != sticky_site
     ]
@@ -78,7 +75,6 @@ def _ensure_access(cfg: Config, preferred_site: str | None = None):
     for site in sites:
         if check_direct(site, timeout=direct_timeout):
             log.info("✓ 直连可用，无需代理: %s", site)
-            pm._save_state({"site": site})
             return site, None, None
     log.info("✗ 直连不可达，启动/复用代理...")
 
@@ -94,7 +90,6 @@ def _ensure_access(cfg: Config, preferred_site: str | None = None):
     for site in sites:
         pm.reset_rotation_cycle()
         if _ensure_site_reachable(pm, site, near_only=True):
-            pm._save_state({"site": site})
             return site, pm.proxy_url(), pm
         log.info("近地区节点暂不可访问 %s，尝试下一个备用站点", site)
 
@@ -102,7 +97,6 @@ def _ensure_access(cfg: Config, preferred_site: str | None = None):
     for site in sites:
         pm.reset_rotation_cycle()
         if _ensure_site_reachable(pm, site, near_only=False, far_only=True):
-            pm._save_state({"site": site})
             return site, pm.proxy_url(), pm
 
     # 保留原有的最后兜底：线路可能在探测窗口内抖动，请求层仍可继续重试。
