@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 import httpx
 from bs4 import BeautifulSoup
@@ -929,21 +929,20 @@ class ZLibraryClient:
                 browser.close()
         return None
 
+    def _rebase_book_urls(self, book: BookResult) -> None:
+        """站点切换后把搜索结果里的绝对详情/下载链接改到当前站点。"""
+        current = urlsplit(self.site)
+        for attr in ("detail_url", "download_url"):
+            value = getattr(book, attr, "")
+            if not value or not value.startswith("http"):
+                continue
+            old = urlsplit(value)
+            setattr(book, attr, urlunsplit((current.scheme, current.netloc, old.path, old.query, old.fragment)))
+
     def download(self, book: BookResult, dest_dir: Path, fmt_pref: list[str] | None = None,
                  max_rounds: int = 3) -> Path:
-        """下载到 dest_dir，返回文件路径。
-
-        `/dl/{code}` 的失败要分成两类，处理方式完全不同：
-
-        - **可重试类**（`_InvalidDownload`）：503 挑战页、返回 HTML 错误页、线路抖动。
-          挑战由 `_request`/`_download_httpx` 自动解 PoW 通过；其余情况清掉 `bsrv`
-          粘性 cookie 换个后端、并换出口节点重试。最后还可以回退真实浏览器。
-        - **不可重试类**（`SiteRejected`：204 No Content / 0 字节）：站点侧这条记录的
-          文件已失效。实测换后端、换出口节点、换账号、用真实浏览器**全都一样是 204**
-          （见 DEV.md 四.1，是记录本身的属性，跟账号/节点/后端无关）——所以**不重试**，
-          直接抛给上层去**换另一条候选记录**（同一本书往往有多条记录，另一条通常能正常
-          下载）。继续在这条记录上换节点/换后端重试只是白白浪费时间。
-        """
+        """下载到 dest_dir，返回文件路径。"""
+        self._rebase_book_urls(book)
         dest_dir = dest_dir.expanduser()
         dest_dir.mkdir(parents=True, exist_ok=True)
         ext = book.format or "epub"

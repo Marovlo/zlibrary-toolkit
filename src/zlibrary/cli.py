@@ -29,8 +29,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import click
+import httpx
 
-from .client import IpQuotaExceeded, SearchServiceUnavailable, SiteRejected
+from .client import CloudflareError, IpQuotaExceeded, SearchServiceUnavailable, SiteRejected
 from .config import Config, project_root
 from .mail import MailConfig, MailError, VerificationMailbox
 from .site_checker import check_direct, check_via_proxy
@@ -53,50 +54,80 @@ def _session_path() -> Path:
     return project_root() / "data" / "session.json"
 
 
-def _ensure_access(cfg: Config):
-    """检测直连，不通则启动代理选最优（若已有后台常驻实例则直接复用）。
-    返回 (site, proxy_url_or_None, proxy_manager_or_None)。"""
-    site = cfg.default_site
-    # 直连探测只是个快速试探，用短超时（而非完整业务超时），
-    # 避免网络不可达时白白等满httpx_timeout（例如 DNS/路由异常时可能耗尽整个超时）。
-    if check_direct(site, timeout=min(8, cfg.access.httpx_timeout)):
-        log.info("✓ 直连可用，无需代理")
-        return site, None, None
+def _ensure_access(cfg: Config, preferred_site: str | None = None):
+    """选择稳定的「代理节点 + 站点」组合。
 
-    log.info("✗ 直连不可达，启动/复用代理...")
+    站点按主站/备用顺序排列；同一站点先尝试当前节点和近地区节点，
+    近节点都失败后才切换站点。成功后由 Web AccessState/CLI 调用方缓存，
+    不在每个请求中重新盲测全部域名。
+    """
+    configured_sites = cfg.sites()
+    if not configured_sites:
+        raise click.ClickException("没有配置可用的 Z-Library 站点")
     from .proxy_manager import ProxyManager
-
     pm = ProxyManager(cfg)
+    persisted_site = pm._load_state().get("site")
+    sticky_site = preferred_site if preferred_site in configured_sites else persisted_site
+    if sticky_site not in configured_sites:
+        sticky_site = None
+    sites = ([sticky_site] if sticky_site else []) + [
+        site for site in configured_sites if site != sticky_site
+    ]
+
+    direct_timeout = min(8, cfg.access.httpx_timeout)
+    for site in sites:
+        if check_direct(site, timeout=direct_timeout):
+            log.info("✓ 直连可用，无需代理: %s", site)
+            pm._save_state({"site": site})
+            return site, None, None
+    log.info("✗ 直连不可达，启动/复用代理...")
+
     try:
         best = pm.setup_and_select_best()
     except RuntimeError as e:
-        # 端口耗尽（ensure_ports 里全部候选都被占用）等场景，转成干净的 CLI 报错，
-        # 不让用户看到 Python traceback。
         raise click.ClickException(str(e)) from e
     if not best:
         raise click.ClickException("无可用代理节点能连通Z-Library")
     log.info("✓ 选定代理节点: %s (%dms)", best.name, best.delay_ms)
-    _ensure_site_reachable(pm, site)
-    return site, pm.proxy_url(), pm
+
+    # 先在当前节点和近地区节点上验证各站点；每个站点开始新一轮节点尝试。
+    for site in sites:
+        pm.reset_rotation_cycle()
+        if _ensure_site_reachable(pm, site, near_only=True):
+            pm._save_state({"site": site})
+            return site, pm.proxy_url(), pm
+        log.info("近地区节点暂不可访问 %s，尝试下一个备用站点", site)
+
+    # 所有站点的近地区节点都失败后，才使用远地区节点兜底。
+    for site in sites:
+        pm.reset_rotation_cycle()
+        if _ensure_site_reachable(pm, site, near_only=False, far_only=True):
+            pm._save_state({"site": site})
+            return site, pm.proxy_url(), pm
+
+    # 保留原有的最后兜底：线路可能在探测窗口内抖动，请求层仍可继续重试。
+    log.warning("暂未找到能访问任何 Z-Library 站点的节点，先保留主站继续尝试")
+    return sites[0], pm.proxy_url(), pm
 
 
-def _ensure_site_reachable(pm, site: str, max_tries: int = 20) -> None:
-    """确认当前出口节点真的能打到 z-library，不行就换节点。
-
-    「节点存活」和「节点能访问 z-library」是两件事：实测出现过 31/31 个节点访问
-    `gstatic.com` 全部正常（最快 68ms），但其中大部分节点到 z-library 全是
-    TLS handshake timeout。所以选完最快节点后还要真的验一次，提前把好节点挑出来，
-    免得后面登录/搜索/下载每一步都各自去踩一遍。
-    """
+def _ensure_site_reachable(
+    pm,
+    site: str,
+    max_tries: int = 32,
+    near_only: bool = False,
+    far_only: bool = False,
+    timeout: int = 8,
+) -> bool:
+    """确认当前节点能访问指定站点；近节点阶段不会触碰远节点。"""
     for i in range(1, max_tries + 1):
-        if check_via_proxy(pm.proxy_url(), site):
-            log.info("✓ 当前节点可访问 Z-Library: %s", pm.current_node())
-            return
-        nxt = pm.rotate_node()
+        if check_via_proxy(pm.proxy_url(), site, timeout=timeout):
+            log.info("✓ 当前节点可访问 Z-Library: %s (%s)", pm.current_node(), site)
+            return True
+        nxt = pm.rotate_node(near_only=near_only, far_only=far_only)
         if not nxt:
             break
-        log.info("节点 %d 不能访问 Z-Library，已换 -> %s", i, nxt)
-    log.warning("暂未找到能访问 Z-Library 的节点，仍继续尝试（请求层还会自动换节点）")
+        log.info("节点 %d 不能访问 %s，已换 -> %s", i, site, nxt)
+    return False
 
 
 def _make_client(cfg: Config, site: str, proxy_url, pm):
@@ -107,7 +138,7 @@ def _make_client(cfg: Config, site: str, proxy_url, pm):
     return ZLibraryClient(
         site=site, proxy_url=proxy_url, user_agent=cfg.access.user_agent,
         httpx_timeout=cfg.access.httpx_timeout, playwright_timeout=cfg.access.playwright_timeout,
-        rotate_node=(pm.rotate_node if pm else None),
+        rotate_node=(lambda: pm.rotate_node(near_only=True)) if pm else None,
     )
 
 
@@ -229,11 +260,41 @@ def _search_with_status(client, query: str, page: int = 1):
         try:
             return client.search(query, page=page)
         except SearchServiceUnavailable:
-            raise click.ClickException(
-                'Z-Library 站点返回："Search service temporary unavailable!"'
-                "（搜索服务临时故障，站点侧问题，与你的书名、账号、代理节点均无关）。\n"
-                "这通常几分钟到几十分钟内会自行恢复，请稍后重试；无需换账号或换节点。"
-            ) from None
+            raise
+
+
+def _is_route_failure(exc: Exception) -> bool:
+    return isinstance(exc, (CloudflareError, SearchServiceUnavailable, httpx.TransportError))
+
+
+def _search_cli_with_recovery(
+    cfg: Config,
+    client,
+    site: str,
+    proxy_url,
+    pm,
+    query: str,
+    page: int,
+    force_anonymous: bool,
+):
+    """当前组合失败后只做一次外层恢复；客户端内部节点重试先于此处切站点。"""
+    try:
+        acc, store = _prepare_account(cfg, client, force_anonymous)
+        results = _search_with_status(client, query, page=page)
+        return client, site, proxy_url, pm, acc, store, results
+    except Exception as e:
+        if not _is_route_failure(e):
+            raise
+    client.close()
+    site, proxy_url, pm = _ensure_access(cfg, preferred_site=site)
+    client = _make_client(cfg, site, proxy_url, pm)
+    try:
+        acc, store = _prepare_account(cfg, client, force_anonymous)
+        results = _search_with_status(client, query, page=page)
+        return client, site, proxy_url, pm, acc, store, results
+    except Exception:
+        client.close()
+        raise
 
 
 @cli.command()
@@ -246,8 +307,14 @@ def search(query: str, page: int, force_anonymous: bool) -> None:
     site, proxy_url, pm = _ensure_access(cfg)
     client = _make_client(cfg, site, proxy_url, pm)
     try:
-        _prepare_account(cfg, client, force_anonymous)
-        results = _search_with_status(client, query, page=page)
+        try:
+            client, site, proxy_url, pm, _acc, _store, results = _search_cli_with_recovery(
+                cfg, client, site, proxy_url, pm, query, page, force_anonymous,
+            )
+        except SearchServiceUnavailable:
+            raise click.ClickException(
+                'Z-Library 站点搜索服务临时故障，主站和备用站均未恢复，请稍后重试。'
+            ) from None
         if not results:
             click.echo("未找到相关书籍")
             return
@@ -270,8 +337,14 @@ def download(query: str, yes: bool, limit: int, force_anonymous: bool) -> None:
     site, proxy_url, pm = _ensure_access(cfg)
     client = _make_client(cfg, site, proxy_url, pm)
     try:
-        acc, store = _prepare_account(cfg, client, force_anonymous)
-        results = _search_with_status(client, query)
+        try:
+            client, site, proxy_url, pm, acc, store, results = _search_cli_with_recovery(
+                cfg, client, site, proxy_url, pm, query, 1, force_anonymous,
+            )
+        except SearchServiceUnavailable:
+            raise click.ClickException(
+                'Z-Library 站点搜索服务临时故障，主站和备用站均未恢复，请稍后重试。'
+            ) from None
         if not results:
             click.echo("未找到相关书籍")
             return
@@ -283,7 +356,7 @@ def download(query: str, yes: bool, limit: int, force_anonymous: bool) -> None:
 
         if yes:
             _echo_auto_pick(candidates[0], query)
-            _do_download(client, pm, acc, store, candidates, cfg)
+            client, pm = _do_download(client, pm, acc, store, candidates, cfg)
             return
 
         # 默认：列出候选让用户自己选，不自动下载
@@ -303,7 +376,7 @@ def download(query: str, yes: bool, limit: int, force_anonymous: bool) -> None:
         book = results[:limit][idx]
         # 用户明确选了某一条，就以它为首选，其余同名候选作为失效兜底
         others = [b for b in candidates if b is not book]
-        _do_download(client, pm, acc, store, [book] + others, cfg)
+        client, pm = _do_download(client, pm, acc, store, [book] + others, cfg)
     finally:
         client.close()
         # 注意：代理进程（mihomo）后台常驻，不在这里 stop，跨次调用复用。用 `zlib stop` 手动停止。
@@ -351,8 +424,29 @@ def _rank_candidates(results, query: str, cfg: Config, max_candidates: int = 6) 
     return sorted([b for b in results if b.download_url or b.detail_url], key=key)[:max_candidates]
 
 
-def _do_download(client, pm, acc, store, candidates, cfg: Config) -> None:
-    """按候选顺序逐条尝试下载，第一条成功即返回。
+def _rebuild_download_client(client, cfg: Config, acc, store):
+    """当前客户端完成节点级重试仍失败后，按主站/备用站重建一次客户端。"""
+    old_site = client.site
+    client.close()
+    new_client = None
+    try:
+        site, proxy_url, pm = _ensure_access(cfg, preferred_site=old_site)
+        new_client = _make_client(cfg, site, proxy_url, pm)
+        if acc:
+            result = new_client.login(acc.email, acc.password)
+            if not result.ok:
+                raise click.ClickException(f"切换站点后账号登录失败: {result.error}")
+            if result.remaining is not None:
+                store.set_remaining(acc, result.remaining)
+        return new_client, pm
+    except Exception:
+        if new_client is not None:
+            new_client.close()
+        raise
+
+
+def _do_download(client, pm, acc, store, candidates, cfg: Config):
+    """按候选顺序逐条尝试下载，第一条成功即返回 `(client, pm)`。
 
     两个要点：
     1. 只在真正下载成功、且本次调用一开始就决定使用登录账号时才计账号额度
@@ -366,31 +460,46 @@ def _do_download(client, pm, acc, store, candidates, cfg: Config) -> None:
     if not isinstance(candidates, list):
         candidates = [candidates]
     errors: list[str] = []
-    for idx, book in enumerate(candidates, 1):
-        if idx > 1:
-            click.echo(f"→ 换下一个候选版本重试:《{book.title[:40]}》"
-                       f"（{(book.format or '?').upper()} {book.size}）")
-        try:
-            path = _download_one(client, pm, book, cfg, acc)
-        except SiteRejected as e:
-            log.warning("候选 %d 被站点拒绝（该记录的文件已失效）: %s", idx, e)
-            errors.append(f"候选{idx}《{book.title[:24]}》: {e}")
+    route_recovered = False
+    while True:
+        restart_candidates = False
+        for idx, book in enumerate(candidates, 1):
+            if idx > 1:
+                click.echo(f"→ 换下一个候选版本重试:《{book.title[:40]}》"
+                           f"（{(book.format or '?').upper()} {book.size}）")
+            try:
+                path = _download_one(client, pm, book, cfg, acc)
+            except SiteRejected as e:
+                log.warning("候选 %d 被站点拒绝（该记录的文件已失效）: %s", idx, e)
+                errors.append(f"候选{idx}《{book.title[:24]}》: {e}")
+                continue
+            except Exception as e:  # noqa: BLE001
+                if _is_route_failure(e) and not route_recovered:
+                    log.warning("当前站点/节点下载失败，按节点优先策略重新选择一次")
+                    try:
+                        client, pm = _rebuild_download_client(client, cfg, acc, store)
+                    except Exception as recovery_error:  # noqa: BLE001
+                        errors.append(f"线路恢复失败: {recovery_error}")
+                        restart_candidates = False
+                        break
+                    route_recovered = True
+                    restart_candidates = True
+                    break
+                log.error("候选 %d 下载失败: %s", idx, e)
+                errors.append(f"候选{idx}《{book.title[:24]}》: {e}")
+                continue
+            if acc:
+                store.mark_used(acc)
+            click.echo(f"下载完成: {path}" + ("" if acc else "（匿名下载，未消耗账号额度）"))
+            return client, pm
+        if restart_candidates:
             continue
-        except Exception as e:  # noqa: BLE001
-            log.error("候选 %d 下载失败: %s", idx, e)
-            errors.append(f"候选{idx}《{book.title[:24]}》: {e}")
-            continue
-        if acc:
-            store.mark_used(acc)
-        click.echo(f"下载完成: {path}" + ("" if acc else "（匿名下载，未消耗账号额度）"))
-        return
-
-    detail = "\n  ".join(errors)
-    raise click.ClickException(
-        f"已尝试全部 {len(candidates)} 个候选版本，均未成功:\n  {detail}\n"
-        "客户端已自动解过站点浏览器校验、并轮换过出口节点与后端。若全部候选都是 204，"
-        "说明这些记录的文件在站点侧已失效/下架，换账号或换节点都无效。"
-    )
+        detail = "\n  ".join(errors)
+        raise click.ClickException(
+            f"已尝试全部 {len(candidates)} 个候选版本，均未成功:\n  {detail}\n"
+            "客户端已自动解过站点浏览器校验、并轮换过出口节点与后端。若全部候选都是 204，"
+            "说明这些记录的文件在站点侧已失效/下架，换账号或换节点都无效。"
+        )
 
 
 def _download_one(client, pm, book, cfg: Config, acc):

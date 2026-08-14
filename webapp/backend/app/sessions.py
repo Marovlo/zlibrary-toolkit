@@ -59,9 +59,15 @@ def get_logged_in_client(account_email: str) -> tuple[ZLibraryClient, object | N
 
     try:
         res = client.login(acc.email, acc.password)
-    except Exception as e:  # noqa: BLE001
+    except Exception:
         client.close()
-        raise ValueError("登录暂时失败，请稍后重试") from e
+        try:
+            access_state.recover()
+            client = access_state.make_client()
+            res = client.login(acc.email, acc.password)
+        except Exception as e:  # noqa: BLE001
+            client.close()
+            raise ValueError("登录暂时失败，请稍后重试") from e
     if not res.ok:
         client.close()
         raise ValueError(f"账号 {acc.email} 登录失败: {res.error}")

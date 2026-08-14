@@ -14,8 +14,13 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import httpx
+from zlibrary.client import CloudflareError, SearchServiceUnavailable
+
 from . import archive, quota
+from .access import access_state
 from .accounts_store import get_account_store
+from .health import health_monitor
 from .sessions import get_logged_in_client
 
 log = logging.getLogger("webapp.jobs")
@@ -93,6 +98,7 @@ def _baidu_enabled() -> bool:
 def _run(job: Job, payload: dict) -> None:
     from zlibrary.client import BookResult
 
+    health_monitor.record_activity()
     book = BookResult(
         title=payload["title"], author=payload.get("author", ""),
         year=payload.get("year", ""), language=payload.get("language", ""),
@@ -139,6 +145,7 @@ def _run(job: Job, payload: dict) -> None:
             # 轮询磁盘文件大小估算下载进度（不侵入 client.py 核心）
             started = False
             while not stop_flag.is_set():
+                health_monitor.record_activity()
                 try:
                     if guess_dest.exists():
                         size = guess_dest.stat().st_size
@@ -158,8 +165,26 @@ def _run(job: Job, payload: dict) -> None:
 
         watcher = threading.Thread(target=_watch_download, daemon=True)
         watcher.start()
+        route_recovered = False
         try:
-            path = client.download(book, dest_dir, max_rounds=3)
+            while True:
+                try:
+                    path = client.download(book, dest_dir, max_rounds=3)
+                    break
+                except (CloudflareError, SearchServiceUnavailable, httpx.TransportError) as e:
+                    if route_recovered:
+                        raise
+                    route_recovered = True
+                    _set(job, message="当前线路失败，正在按主站/备用站恢复...")
+                    client.close()
+                    access_state.recover()
+                    client = access_state.make_client()
+                    if acc:
+                        login = client.login(acc.email, acc.password)
+                        if not login.ok:
+                            raise RuntimeError(f"切换站点后账号登录失败: {login.error}")
+                        if login.remaining is not None:
+                            get_account_store().set_remaining(acc, login.remaining)
         except Exception as e:  # noqa: BLE001
             stop_flag.set()
             client.close()

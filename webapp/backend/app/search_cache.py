@@ -6,8 +6,8 @@
 省下的是"重新发一次搜索请求"的开销（PoW 解题 + 网络往返 + HTML 解析），跟下载
 链接的新鲜度完全无关，不影响下载本身。
 
-缓存粒度：(归一化后的查询词, 页码) -> 结果列表。不区分 account_email，因为搜索
-结果内容跟用哪个账号无关（账号只影响下载额度，不影响能搜到什么）。
+缓存粒度：(归一化后的查询词, 页码, 当前站点) -> 结果列表。不区分 account_email，因为搜索
+结果内容跟用哪个账号无关（账号只影响下载额度，不影响能搜到什么）；切换站点后不复用旧站点结果。
 
 TTL 默认 12 小时，进程内内存缓存，服务重启即清空（简单优先，不做持久化——
 私人面板量级下，重启不频繁，没必要为了跨重启保留缓存增加复杂度）。
@@ -21,15 +21,15 @@ TTL_SECONDS = 12 * 3600
 MAX_ENTRIES = 500  # 简单的容量上限，超过后清掉最老的一半，避免无限增长
 
 _lock = threading.Lock()
-_cache: dict[tuple[str, int], tuple[float, list]] = {}
+_cache: dict[tuple[str, int, str], tuple[float, list]] = {}
 
 
-def _key(query: str, page: int) -> tuple[str, int]:
-    return (query.strip().lower(), page)
+def _key(query: str, page: int, site: str = "") -> tuple[str, int, str]:
+    return (query.strip().lower(), page, site.strip().rstrip("/"))
 
 
-def get(query: str, page: int) -> list | None:
-    k = _key(query, page)
+def get(query: str, page: int, site: str = "") -> list | None:
+    k = _key(query, page, site)
     with _lock:
         entry = _cache.get(k)
         if not entry:
@@ -41,8 +41,8 @@ def get(query: str, page: int) -> list | None:
         return data
 
 
-def set(query: str, page: int, data: list) -> None:
-    k = _key(query, page)
+def set(query: str, page: int, data: list, site: str = "") -> None:
+    k = _key(query, page, site)
     with _lock:
         if len(_cache) >= MAX_ENTRIES:
             # 超过容量上限：简单粗暴地清掉最老的一半，不做精细 LRU

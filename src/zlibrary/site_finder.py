@@ -18,7 +18,7 @@ import httpx
 log = logging.getLogger(__name__)
 
 # 已知的 Z-Library 域名特征
-ZLIB_DOMAIN_HINTS = ["z-library.sk", "z-lib.io", "z-lib.org", "1lib.sk", "zlibrary"]
+ZLIB_DOMAIN_HINTS = ["z-library.sk", "zlib.bz", "z-lib.sk", "z-lib.io", "z-lib.org", "1lib.sk", "zlibrary"]
 SEARCH_QUERIES = ["z-library official site", "zlibrary official domain"]
 
 

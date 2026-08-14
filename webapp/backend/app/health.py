@@ -34,7 +34,6 @@ import threading
 import time
 from typing import Callable
 
-from zlibrary.cli import _ensure_site_reachable
 from zlibrary.site_checker import check_direct, check_via_proxy
 
 from .access import access_state
@@ -84,8 +83,7 @@ def _probe_via_search() -> bool:
         log.info("搜索探测：无法建立客户端: %s", e)
         return False
     try:
-        client.search(PROBE_QUERY, page=1)
-        return True
+        return bool(client.search(PROBE_QUERY, page=1))
     except Exception as e:  # noqa: BLE001
         log.info("搜索探测失败: %s: %s", type(e).__name__, e)
         return False
@@ -107,6 +105,8 @@ class HealthMonitor:
         self.last_activity_at: float = time.time()
         self.last_check_at: float = 0.0
         self._thread: threading.Thread | None = None
+        self._wake = threading.Event()
+        self._refresh_requested = False
 
     def _set(self, **kw) -> None:
         with self._lock:
@@ -133,6 +133,12 @@ class HealthMonitor:
         self._thread.start()
         log.info("健康监控线程已启动，进程启动即开始探测")
 
+    def request_refresh(self) -> None:
+        """请求后台立即复检，接口本身不等待结果。"""
+        with self._lock:
+            self._refresh_requested = True
+        self._wake.set()
+
     # ---------- 主循环 ----------
 
     def _loop(self) -> None:
@@ -140,19 +146,33 @@ class HealthMonitor:
         self.last_check_at = time.time()
 
         while True:
-            time.sleep(POLL_TICK)
+            self._wake.wait(POLL_TICK)
+            self._wake.clear()
             now = time.time()
-            if self.status in ("direct", "proxy_ok"):
-                idle_long_enough = (now - self.last_activity_at) >= IDLE_RECHECK_INTERVAL
-                check_due = (now - self.last_check_at) >= IDLE_RECHECK_INTERVAL
+            with self._lock:
+                forced = self._refresh_requested
+                self._refresh_requested = False
+                status = self.status
+                last_activity = self.last_activity_at
+                last_check = self.last_check_at
+            if forced:
+                self._set(status="switching", message="收到刷新请求，正在检查当前线路...")
+                self._recover_via_rotation()
+                with self._lock:
+                    self.last_check_at = time.time()
+                continue
+            if status in ("direct", "proxy_ok"):
+                idle_long_enough = (now - last_activity) >= IDLE_RECHECK_INTERVAL
+                check_due = (now - last_check) >= IDLE_RECHECK_INTERVAL
                 if idle_long_enough and check_due:
                     log.info("空闲超过 %ds 且距上次检查也超过该时长，趁空闲复检一次", IDLE_RECHECK_INTERVAL)
                     self._recheck_stable()
-                    self.last_check_at = now
-            else:
-                if (now - self.last_check_at) >= UNHEALTHY_RETRY_INTERVAL:
-                    self._recheck_unhealthy()
-                    self.last_check_at = now
+                    with self._lock:
+                        self.last_check_at = time.time()
+            elif (now - last_check) >= UNHEALTHY_RETRY_INTERVAL:
+                self._recheck_unhealthy()
+                with self._lock:
+                    self.last_check_at = time.time()
 
     def _initial_probe(self) -> None:
         self._set(status="connecting", message="正在检测直连 / 选择可用代理...")
@@ -202,13 +222,8 @@ class HealthMonitor:
                 if _probe_via_search():
                     self._set(status="direct", site=site, node=None, error=None, message="")
                     return
-            log.info("直连已失效，重新走接入流程（可能需要切到代理）")
+            log.info("直连已失效，重新走接入流程（可能需要切到代理或备用站点）")
             self._set(status="connecting", message="直连已失效，重新选择接入方式...")
-            try:
-                access_state.ensure(force=True)
-            except Exception:  # noqa: BLE001
-                self._set(status="unavailable", error="当前网络暂不可用，请稍后重试")
-                return
             self._recover_via_rotation()
             return
 
@@ -217,21 +232,27 @@ class HealthMonitor:
                 self._set(status="proxy_ok", site=site, node=pm.current_node(), error=None, message="")
                 return
         self._set(status="switching", site=site, node=pm.current_node(),
-                  message="当前节点无法正常搜索，正在切换节点...")
+                  message="当前节点无法正常搜索，正在按主站/备用站恢复...")
         self._recover_via_rotation()
 
     def _recover_via_rotation(self) -> None:
-        """轮换节点直到轻量校验 + 真实搜索都通过，或轮换耗尽仍不行。"""
-        _cfg, site, _proxy_url, pm = access_state.ensure()
-        if pm is None:
-            self._set(status="unavailable", site=site, error="当前网络暂不可用，请稍后重试")
+        """按节点优先、站点兜底重新选择，并用真实搜索确认。"""
+        try:
+            _cfg, site, _proxy_url, pm = access_state.recover()
+        except Exception:
+            self._set(status="unavailable", error="暂未找到可正常搜索的站点或节点，请稍后重试")
             return
-        _ensure_site_reachable(pm, site)  # 跟 CLI 启动时同一个函数：自动轮换直到轻量校验通过
+        if pm is None:
+            if _probe_via_search():
+                self._set(status="direct", site=site, node=None, error=None, message="")
+            else:
+                self._set(status="unavailable", site=site, error="当前网络暂不可用，请稍后重试")
+            return
         if check_via_proxy(pm.proxy_url(), site, timeout=15) and _probe_via_search():
             self._set(status="proxy_ok", site=site, node=pm.current_node(), error=None, message="")
         else:
             self._set(status="unavailable", site=site, node=pm.current_node(),
-                      error="暂未找到可正常搜索的节点，请稍后重试")
+                      error="暂未找到可正常搜索的站点或节点，请稍后重试")
 
 
 # 进程内单例：跟 app 生命周期一致，main.py 启动时调用 start()。

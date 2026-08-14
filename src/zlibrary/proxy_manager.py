@@ -571,34 +571,23 @@ class ProxyManager:
         """返回本地代理 URL，供 httpx/playwright 使用。"""
         return f"http://127.0.0.1:{self.mcfg.http_port}"
 
-    def rotate_node(self) -> str | None:
+    def reset_rotation_cycle(self) -> None:
+        """开始一轮新的节点探测（切换站点时使用）。"""
+        with self._rotate_lock:
+            self._rotated.clear()
+
+    def rotate_node(self, near_only: bool = False, far_only: bool = False) -> str | None:
         """换到下一个「当前实测可用」的节点，返回新节点名；无可换节点返回 None。
 
         节点抖动很常见（同一节点几分钟内可能从可用变成 TLS 握手超时），而站点又按出口IP
         把请求路由到不同后端、不同后端对同一本书的态度还不一样，所以「换出口重试」
         既能绕开线路抖动，也能绕开拒绝该资源的后端。
-
-        **地区优先**：近距离节点（港/台/新马/日/韩/印，实测延迟低、稳定性明显更好）
-        永远排在远距离节点（欧美等）之前尝试，且每个近距离候选会多试几次
-        （`NEAR_REGION_TEST_RETRIES`，应对瞬时抖动），只有全部近距离节点都反复
-        试过仍不通，才会开始尝试远距离节点兜底。远距离节点本身只是兜底，不值得
-        为它们浪费时间重试，一次不通就换下一个。
-
-        为避免每次轮换都全量测速，这里只做「快速验活」逐个尝试，第一个通的就用；
-        轮换过的节点记在 `_rotated` 里不再重复。
-
-        用 `_rotate_lock` 把整个"读取当前节点 -> 逐个测活 -> 真的切换 selector"
-        串行化：webapp 场景下真实搜索线程、下载线程、后台健康监控线程可能几乎同时
-        都触发轮换，不加锁会导致几个线程同时读写 `_rotated`/并发调用 mihomo API
-        切换 selector，相互踩踏。代价是"某线程轮换进行中时，其它线程的轮换请求要
-        排队等待"，对私人面板这种低并发场景完全可接受；简化点在于：排队等待的
-        线程被唤醒后仍会按"从自己认知的旧 current 出发"重新走一轮测活，可能比
-        严格最优多测 1 个节点，但不会导致状态错乱，权衡合理。
         """
+        # 近节点优先，且把轮换过程串行化，避免多个请求互相踩 selector。
         with self._rotate_lock:
-            return self._rotate_node_impl()
+            return self._rotate_node_impl(near_only=near_only, far_only=far_only)
 
-    def _rotate_node_impl(self) -> str | None:
+    def _rotate_node_impl(self, near_only: bool = False, far_only: bool = False) -> str | None:
         try:
             nodes = self.list_nodes()
             current = self.current_node()
@@ -635,13 +624,14 @@ class ProxyManager:
                     return name
             return None
 
-        result = _try_group(near, NEAR_REGION_TEST_RETRIES) or _try_group(far, 0)
+        result = None if far_only else _try_group(near, NEAR_REGION_TEST_RETRIES)
+        if not near_only:
+            result = result or _try_group(far, 0)
         if result:
             return result
 
-        # 全部（近+远）轮换过一遍仍没找到可用的：清空记录再给一次机会。
-        # 线路抖动是常态，几十秒前不通的节点现在可能已经恢复，直接放弃太早。
-        if self._rotated:
+        # 站点切换阶段只探测一轮近节点；完整节点轮换仍保留原来的第二轮重试。
+        if not near_only and not far_only and self._rotated:
             log.info("全部 %d 个节点轮换过一遍均不可用，清空记录重新尝试一轮", len(nodes))
             self._rotated.clear()
             result = _try_group(near, NEAR_REGION_TEST_RETRIES) or _try_group(far, 0)
@@ -677,6 +667,7 @@ class ProxyManager:
 
         state = self._load_state()
         state.update(patch)
+        self.work_dir.mkdir(parents=True, exist_ok=True)
         self._state_file().write_text(json.dumps(state), encoding="utf-8")
 
     # ---------- 一键编排 ----------

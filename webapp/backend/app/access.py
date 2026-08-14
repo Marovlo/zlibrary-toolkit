@@ -30,25 +30,37 @@ class AccessState:
         self.pm = None
         self.error: str | None = None
 
-    def load_config(self) -> Config:
-        if self.cfg is None:
+    def load_config(self, force: bool = False) -> Config:
+        if self.cfg is None or force:
             self.cfg = Config.load()
         return self.cfg
 
     def ensure(self, force: bool = False):
-        """返回 (cfg, site, proxy_url, pm)。已缓存且非强制刷新时直接返回缓存。"""
+        """返回 (cfg, site, proxy_url, pm)，成功后缓存当前站点组合。"""
         with self._lock:
+            previous_site = self.site
             if self.site and not force:
                 return self.cfg, self.site, self.proxy_url, self.pm
-            cfg = self.load_config()
+            if force:
+                # 强制恢复失败后不能继续把旧站点当作健康路由返回。
+                self.site = self.proxy_url = self.pm = None
+            cfg = self.load_config(force=force)
             try:
-                site, proxy_url, pm = _ensure_access(cfg)
-            except (click.ClickException, Exception) as e:  # noqa: BLE001
+                site, proxy_url, pm = _ensure_access(cfg, preferred_site=previous_site)
+            except Exception as e:  # noqa: BLE001
                 self.error = str(e)
                 log.warning("接入失败: %s", e)
                 raise
             self.site, self.proxy_url, self.pm, self.error = site, proxy_url, pm, None
             return cfg, self.site, self.proxy_url, self.pm
+
+    def recover(self):
+        """强制重新选择站点和节点，供请求/健康检查失败时调用。"""
+        return self.ensure(force=True)
+
+    def current_site(self) -> str | None:
+        with self._lock:
+            return self.site
 
     def make_client(self):
         cfg, site, proxy_url, pm = self.ensure()

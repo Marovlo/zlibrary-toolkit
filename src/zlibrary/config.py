@@ -75,11 +75,21 @@ class Config:
     site_finder: SiteFinderConfig
     access: AccessConfig
     baidupcs: BaidupcsConfig
+    fallback_sites: list[str] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
 
     def download_dir_abs(self) -> Path:
         d = Path(self.download_dir).expanduser()
         return d
+
+    def sites(self) -> list[str]:
+        """按主站优先顺序返回去重后的站点列表。"""
+        result: list[str] = []
+        for site in [self.default_site, *self.fallback_sites]:
+            normalized = site.strip().rstrip("/")
+            if normalized and normalized not in result:
+                result.append(normalized)
+        return result
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> "Config":
@@ -90,6 +100,7 @@ class Config:
         return cls(
             subscription_url=data["subscription_url"],
             default_site=data["default_site"],
+            fallback_sites=[str(site) for site in data.get("fallback_sites", [])],
             download_dir=data["download_dir"],
             format_preference=data.get("format_preference", ["epub", "pdf"]),
             mihomo=MihomoConfig(

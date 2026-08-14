@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import httpx
 from fastapi import APIRouter, HTTPException
 
+from zlibrary.client import CloudflareError, SearchServiceUnavailable
+
 from .. import search_cache
+from ..access import access_state
 from ..errors import friendly_error
 from ..health import health_monitor
 from ..schemas import BookOut, SearchRequest
@@ -15,22 +19,35 @@ router = APIRouter(prefix="/api/search", tags=["search"])
 def search(req: SearchRequest) -> list[BookOut]:
     health_monitor.record_activity()  # 真实搜索操作，用于健康监控判断"是否空闲"
 
+    cache_site = access_state.current_site() or ""
     if not req.force_refresh:
-        cached = search_cache.get(req.query, req.page)
+        cached = search_cache.get(req.query, req.page, cache_site)
         if cached is not None:
             return cached
 
-    try:
-        client, _acc = get_logged_in_client(req.account_email)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+    def search_once():
+        try:
+            client, _acc = get_logged_in_client(req.account_email)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        try:
+            return client.search(req.query, page=req.page)
+        finally:
+            client.close()
 
     try:
-        results = client.search(req.query, page=req.page)
+        results = search_once()
+    except (CloudflareError, SearchServiceUnavailable, httpx.TransportError):
+        # 客户端已经完成当前节点内重试；此处才触发一次新的「节点优先、站点兜底」选择。
+        try:
+            access_state.recover()
+            results = search_once()
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise friendly_error(e)
     except Exception as e:  # noqa: BLE001
         raise friendly_error(e)
-    finally:
-        client.close()
 
     out = [
         BookOut(
@@ -41,5 +58,5 @@ def search(req: SearchRequest) -> list[BookOut]:
         )
         for b in results
     ]
-    search_cache.set(req.query, req.page, out)
+    search_cache.set(req.query, req.page, out, access_state.current_site() or "")
     return out

@@ -5,8 +5,11 @@
 # 订阅链接（clash 格式，含ss/vmess/trojan 等混合协议）。换成你自己的订阅地址/token。
 subscription_url: "https://your-subscription-provider.example.com/api/v1/client/subscribe?token=YOUR_TOKEN"
 
-# 默认官网（当前已知；如失效会触发 site_finder）
+# 主站，按顺序依次作为备用站点（主站仍优先）
 default_site: "https://zh.z-library.sk"
+fallback_sites:
+  - "https://zlib.bz"
+  - "https://z-lib.sk"
 
 # 下载目录
 download_dir: "~/Downloads/zlibrary"

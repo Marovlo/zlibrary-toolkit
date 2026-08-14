@@ -18,7 +18,9 @@ cd zlibrary
 ## 配置
 
 1. **config.yaml** — 主配置。`install.sh` 会从 `config.example.yaml` 生成，
-   **必须编辑其中的 `subscription_url` 为你自己的订阅链接**才能使用。
+   **必须编辑其中的 `subscription_url` 为你自己的订阅链接**才能使用。`default_site`
+   是主站（当前为 `zh.z-library.sk`），`fallback_sites` 按顺序配置备用站点（当前为
+   `zlib.bz`、`z-lib.sk`）。
 2. **accounts.yaml** — Z-Library 账号池，`install.sh` 会生成一个空模板。
    推荐用命令添加已有账号（会先做真实登录测试，成功才写入，不会存入错误密码）：
 
