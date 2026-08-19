@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import quote, urljoin, urlsplit, urlunsplit
+from urllib.parse import quote, unquote, urljoin, urlsplit, urlunsplit
 
 import httpx
 from bs4 import BeautifulSoup
@@ -1021,13 +1021,11 @@ class ZLibraryClient:
                             f"返回 HTML 页面而非书籍文件 (HTTP {r.status_code}, "
                             f"content-type={ct}, backend={backend})")
                     r.raise_for_status()
-                    # 服务端给了文件名则优先用
+                    # 服务端给了文件名则优先用；只用 basename，禁止写出 dest_dir。
                     cd = r.headers.get("content-disposition", "")
                     mfn = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?', cd)
                     if mfn:
-                        fname = mfn.group(1).strip()
-                        if fname and not fname.endswith("/"):
-                            dest = dest_dir / fname
+                        dest = _safe_download_dest(dest_dir, mfn.group(1), dest)
                     log.info("开始落盘 (backend=%s, content-type=%s) -> %s", backend, ct, dest)
                     with open(dest, "wb") as f:
                         for chunk in r.iter_bytes():
@@ -1195,6 +1193,24 @@ class ZLibraryClient:
 
 
 # ---------- 工具函数 ----------
+
+
+def _safe_download_dest(dest_dir: Path, suggested: str, fallback: Path) -> Path:
+    """把响应头里的文件名收成 dest_dir 内的单一路径分量。
+
+    订阅节点不可信，且 httpx 关闭了证书校验，不能把 Content-Disposition 原样
+    拼进落盘路径，否则 `../` 或反斜杠会写出下载目录。
+    """
+    name = unquote(suggested).replace("\\", "/").split("/")[-1].strip().strip("\"'")
+    if not name or name in (".", ".."):
+        return fallback
+    dest = dest_dir / name
+    dest_root = dest_dir.resolve()
+    try:
+        dest.resolve().relative_to(dest_root)
+    except ValueError:
+        return fallback
+    return dest
 
 
 def _find(pattern: str, text: str, default: str) -> str:

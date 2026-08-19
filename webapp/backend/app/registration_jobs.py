@@ -107,7 +107,10 @@ def _run(job: RegistrationJob) -> None:
         job.update(status="success", phase="done", message="注册并登录验证成功，已加入账号池")
     except Exception as e:  # noqa: BLE001
         log.warning("后台注册任务失败: %s", e)
-        job.update(status="failed", phase="failed", message="注册失败", error=str(e))
+        error = str(e).strip()
+        if not error or "\n" in error or len(error) > 180:
+            error = "注册失败，请稍后重试"
+        job.update(status="failed", phase="failed", message="注册失败", error=error)
     finally:
         if client is not None:
             client.close()

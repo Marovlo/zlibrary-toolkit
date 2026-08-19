@@ -56,6 +56,9 @@ def get_logged_in_client(account_email: str) -> tuple[ZLibraryClient, object | N
         state = client.check_logged_in()
         if state:
             return client, acc
+        if state is None:
+            client.close()
+            raise ValueError("当前网络暂不可用，请稍后重试")
 
     try:
         res = client.login(acc.email, acc.password)

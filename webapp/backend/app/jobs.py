@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
-from zlibrary.client import CloudflareError, SearchServiceUnavailable
+from zlibrary.client import CloudflareError, IpQuotaExceeded, SearchServiceUnavailable
 
 from . import archive, quota
 from .access import access_state
@@ -171,6 +171,16 @@ def _run(job: Job, payload: dict) -> None:
                 try:
                     path = client.download(book, dest_dir, max_rounds=3)
                     break
+                except IpQuotaExceeded as e:
+                    log.warning("当前出口IP匿名下载额度已用完（IP: %s）", e.ip or "未知")
+                    pm = access_state.pm
+                    if not pm:
+                        raise
+                    nxt = pm.rotate_node()
+                    if not nxt:
+                        raise
+                    _set(job, message="当前出口匿名额度已用完，正在切换节点...")
+                    continue
                 except (CloudflareError, SearchServiceUnavailable, httpx.TransportError) as e:
                     if route_recovered:
                         raise
@@ -245,5 +255,5 @@ def _run(job: Job, payload: dict) -> None:
         log.warning("上传百度网盘失败: %s: %s", type(e).__name__, e)
         # 上传失败不阻断主流程：仍可本地下载，只是没有分享链接
         _set(job, status="success", progress=1.0, phase="done",
-             message=f"下载完成（上传百度网盘失败: {e}），可保存到本地",
+             message="下载完成（上传百度网盘失败），可保存到本地",
              archived_id=archived_id)

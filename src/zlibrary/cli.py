@@ -553,7 +553,7 @@ def add_account(email: str, password: str | None) -> None:
 
 
 _REGISTER_DOMAIN = "marovlo.cloud"
-_REGISTER_LOCAL_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._+-]{0,62}[A-Za-z0-9])?\\Z")
+_REGISTER_LOCAL_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._+-]{0,62}[A-Za-z0-9])?\Z")
 
 
 def _registration_email(value: str | None, existing: set[str]) -> str:

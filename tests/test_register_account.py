@@ -11,6 +11,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from zlibrary.client import ZLibraryClient
+from zlibrary.cli import _REGISTER_LOCAL_RE, _registration_email
 from zlibrary.mail import MailConfig, MailError, VerificationMailbox
 
 
@@ -113,6 +114,27 @@ def test_registration_form_data_is_dynamic() -> None:
     assert post.call_args.kwargs["data"] == session.fields
 
 
+def test_registration_email_local_part_is_anchored() -> None:
+    import click
+
+    assert _REGISTER_LOCAL_RE.fullmatch("test-001")
+    assert _REGISTER_LOCAL_RE.fullmatch("a")
+    assert _registration_email("test-001", set()) == "test-001@marovlo.cloud"
+    assert _registration_email("User.Name+1@marovlo.cloud", set()) == "User.Name+1@marovlo.cloud"
+    try:
+        _registration_email("bad email", set())
+    except click.ClickException:
+        pass
+    else:
+        raise AssertionError("非法本地部分应被拒绝")
+    try:
+        _registration_email("test-001@other.example", set())
+    except click.ClickException:
+        pass
+    else:
+        raise AssertionError("非指定域名应被拒绝")
+
+
 def test_blank_registration_form_response_is_pending_success() -> None:
     client = ZLibraryClient("https://example.test", None, "test-agent")
     class Response:
@@ -130,8 +152,5 @@ if __name__ == "__main__":
     test_old_uid_is_ignored()
     test_registration_form_data_is_dynamic()
     test_blank_registration_form_response_is_pending_success()
-    print("register-account 离线自测通过")
-    test_extract_code_from_forwarded_html()
-    test_old_uid_is_ignored()
-    test_registration_form_data_is_dynamic()
+    test_registration_email_local_part_is_anchored()
     print("register-account 离线自测通过")
