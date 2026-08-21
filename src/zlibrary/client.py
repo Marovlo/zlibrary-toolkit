@@ -19,6 +19,7 @@ import json
 import logging
 import re
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -67,6 +68,8 @@ class BookResult:
     download_url: str = ""  # 搜索结果里直接带的下载链接（z-bookcard[download]），有则无需再访问详情页
     cover_url: str = ""
     raw_html: str = ""  # 原始卡片 HTML，调试用
+    isbn: str = ""
+    publisher: str = ""
 
     def match_score(self, query: str) -> int:
         """完全匹配=100；前缀匹配（一方是另一方的前缀）=90；包含（子串出现在
@@ -84,10 +87,8 @@ class BookResult:
         可信度和"标题中间包含关键词"差不多，不该被拔高到跟前缀匹配一样可信，
         否则可能让一本明显不是用户想要的书被自动选中下载。
         """
-        def norm(s: str) -> str:
-            return re.sub(r"[^\w\s]", "", s.lower()).strip()
-        nq = norm(query)
-        nt = norm(self.title)
+        nq = normalize_search_text(query)
+        nt = normalize_search_text(self.title)
         if not nq or not nt:
             return 0
         if nt == nq:
@@ -97,6 +98,34 @@ class BookResult:
         if nq in nt or nt in nq:
             return 50
         return 0
+
+
+def normalize_search_text(value: str | None) -> str:
+    text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    text = re.sub(r"[^\w\s]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def is_echo_pseudo_result(book: BookResult, query: str) -> bool:
+    title = normalize_search_text(book.title)
+    query_text = normalize_search_text(query)
+    author = normalize_search_text(book.author)
+    publisher = normalize_search_text(book.publisher)
+    return bool(
+        query_text
+        and title
+        and author
+        and publisher
+        and title == query_text
+        and author == title
+        and publisher == title
+        and not str(book.isbn or "").strip()
+        and not str(book.hash or "").strip()
+    )
+
+
+def filter_search_results(results: list[BookResult], query: str) -> list[BookResult]:
+    return [book for book in results if not is_echo_pseudo_result(book, query)]
 
 
 @dataclass
@@ -665,7 +694,9 @@ class ZLibraryClient:
         try:
             results = self._search_httpx(query, page)
             if results:
-                return results
+                filtered = filter_search_results(results, query)
+                log.info("搜索结果过滤回声伪卡: %d -> %d", len(results), len(filtered))
+                return filtered
             log.info("httpx 搜索无结果，尝试 playwright")
         except SearchServiceUnavailable:
             # 站点搜索服务本身故障，playwright 会看到同一句提示，白等一轮没有意义，直接抛出
@@ -674,7 +705,10 @@ class ZLibraryClient:
             log.warning("搜索遇 Cloudflare，回退 playwright: %s", e)
         except Exception as e:  # noqa: BLE001
             log.warning("httpx 搜索失败，回退 playwright: %s", e)
-        return self._search_playwright(query, page)
+        results = self._search_playwright(query, page)
+        filtered = filter_search_results(results, query)
+        log.info("搜索结果过滤回声伪卡: %d -> %d", len(results), len(filtered))
+        return filtered
 
     def _search_httpx(self, query: str, page: int) -> list[BookResult]:
         q = quote(query)
@@ -735,8 +769,16 @@ class ZLibraryClient:
             return None
         title_el = card.select_one("div[slot='title']")
         author_el = card.select_one("div[slot='author']")
-        title = title_el.get_text(strip=True) if title_el else ""
-        author = author_el.get_text(strip=True) if author_el else ""
+        title = (title_el.get_text(strip=True) if title_el else "") or card.get("title", "")
+        author = (author_el.get_text(strip=True) if author_el else "") or card.get("author", "")
+        isbn_el = card.select_one("[itemprop='isbn']")
+        publisher_el = card.select_one("[itemprop='publisher']")
+        isbn = card.get("isbn") or card.get("data-isbn", "")
+        if not isbn and isbn_el:
+            isbn = isbn_el.get("content") or isbn_el.get_text(strip=True)
+        publisher = card.get("publisher") or card.get("data-publisher", "")
+        if not publisher and publisher_el:
+            publisher = publisher_el.get("content") or publisher_el.get_text(strip=True)
         detail_url = href if href.startswith("http") else urljoin(self.site + "/", href)
         dl_url = (dl if dl.startswith("http") else urljoin(self.site + "/", dl)) if dl else ""
         cover = ""
@@ -750,8 +792,9 @@ class ZLibraryClient:
             year=card.get("year", ""), language=card.get("language", ""),
             format=card.get("extension", ""), size=card.get("filesize", ""),
             rating=_to_float(card.get("rating")),
-            book_id=bid, hash=card.get("termshash", ""),
+            book_id=bid, hash=card.get("termshash") or card.get("hash") or card.get("data-hash", ""),
             detail_url=detail_url, download_url=dl_url, cover_url=cover,
+            isbn=isbn.strip(), publisher=publisher.strip(),
         )
 
     def _parse_card(self, card) -> BookResult | None:
@@ -787,6 +830,14 @@ class ZLibraryClient:
                 author = el.get_text(strip=True)
                 if author:
                     break
+        isbn = card.get("data-isbn") or card.get("isbn", "")
+        isbn_el = card.select_one("[itemprop='isbn']")
+        if not isbn and isbn_el:
+            isbn = isbn_el.get("content") or isbn_el.get_text(strip=True)
+        publisher = card.get("data-publisher") or card.get("publisher", "")
+        publisher_el = card.select_one("[itemprop='publisher']")
+        if not publisher and publisher_el:
+            publisher = publisher_el.get("content") or publisher_el.get_text(strip=True)
         # year / language / format / size 从文本块提取
         text = card.get_text(" ", strip=True)
         year = _find(r"(19|20)\d{2}", text, "")
@@ -805,6 +856,7 @@ class ZLibraryClient:
             title=title or bid, author=author, year=year, language=lang,
             format=fmt, size=size, rating=rating, book_id=bid, hash=h,
             detail_url=detail_url, cover_url=cover,
+            isbn=isbn.strip(), publisher=publisher.strip(),
         )
 
     def _search_playwright(self, query: str, page: int) -> list[BookResult]:

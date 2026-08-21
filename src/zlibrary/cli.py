@@ -31,7 +31,7 @@ from pathlib import Path
 import click
 import httpx
 
-from .client import CloudflareError, IpQuotaExceeded, SearchServiceUnavailable, SiteRejected
+from .client import CloudflareError, IpQuotaExceeded, SearchServiceUnavailable, SiteRejected, is_echo_pseudo_result
 from .config import Config, project_root
 from .mail import MailConfig, MailError, VerificationMailbox
 from .site_checker import check_direct, check_via_proxy
@@ -415,7 +415,11 @@ def _rank_candidates(results, query: str, cfg: Config, max_candidates: int = 6) 
             -b.rating,
         )
 
-    return sorted([b for b in results if b.download_url or b.detail_url], key=key)[:max_candidates]
+    candidates = [
+        b for b in results
+        if (b.download_url or b.detail_url) and not is_echo_pseudo_result(b, query)
+    ]
+    return sorted(candidates, key=key)[:max_candidates]
 
 
 def _rebuild_download_client(client, cfg: Config, acc, store):

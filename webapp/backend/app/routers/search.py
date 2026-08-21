@@ -3,7 +3,7 @@ from __future__ import annotations
 import httpx
 from fastapi import APIRouter, HTTPException
 
-from zlibrary.client import CloudflareError, SearchServiceUnavailable
+from zlibrary.client import CloudflareError, SearchServiceUnavailable, filter_search_results
 
 from .. import search_cache
 from ..access import access_state
@@ -49,11 +49,13 @@ def search(req: SearchRequest) -> list[BookOut]:
     except Exception as e:  # noqa: BLE001
         raise friendly_error(e)
 
+    results = filter_search_results(results, req.query)
     out = [
         BookOut(
             title=b.title, author=b.author, year=b.year, language=b.language,
             format=b.format, size=b.size, rating=b.rating, book_id=b.book_id,
             hash=b.hash, detail_url=b.detail_url, download_url=b.download_url,
+            isbn=b.isbn, publisher=b.publisher,
             match_score=b.match_score(req.query),
         )
         for b in results

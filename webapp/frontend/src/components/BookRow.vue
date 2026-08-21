@@ -104,6 +104,8 @@ async function startDownload() {
       rating: props.book.rating,
       detail_url: props.book.detail_url,
       download_url: props.book.download_url,
+      isbn: props.book.isbn,
+      publisher: props.book.publisher,
       account_email: props.accountEmail,
     });
     applyJob(job);

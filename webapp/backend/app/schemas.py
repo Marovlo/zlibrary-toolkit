@@ -55,6 +55,8 @@ class BookOut(BaseModel):
     hash: str
     detail_url: str
     download_url: str = ""
+    isbn: str = ""
+    publisher: str = ""
     match_score: int = 0
 
 
@@ -70,6 +72,8 @@ class DownloadRequest(BaseModel):
     rating: float = 0.0
     detail_url: str = ""
     download_url: str = ""
+    isbn: str = ""
+    publisher: str = ""
     account_email: str = ""
 
 

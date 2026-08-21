@@ -17,15 +17,16 @@ from __future__ import annotations
 import threading
 import time
 
+FILTER_VERSION = "echo-filter-v1"
 TTL_SECONDS = 12 * 3600
 MAX_ENTRIES = 500  # 简单的容量上限，超过后清掉最老的一半，避免无限增长
 
 _lock = threading.Lock()
-_cache: dict[tuple[str, int, str], tuple[float, list]] = {}
+_cache: dict[tuple[str, str, int, str], tuple[float, list]] = {}
 
 
-def _key(query: str, page: int, site: str = "") -> tuple[str, int, str]:
-    return (query.strip().lower(), page, site.strip().rstrip("/"))
+def _key(query: str, page: int, site: str = "") -> tuple[str, str, int, str]:
+    return (FILTER_VERSION, query.strip().lower(), page, site.strip().rstrip("/"))
 
 
 def get(query: str, page: int, site: str = "") -> list | None:

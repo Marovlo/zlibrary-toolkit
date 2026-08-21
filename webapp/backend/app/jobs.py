@@ -106,6 +106,7 @@ def _run(job: Job, payload: dict) -> None:
         rating=float(payload.get("rating") or 0), book_id=payload["book_id"],
         hash=payload["hash"], detail_url=payload.get("detail_url", ""),
         download_url=payload.get("download_url", ""),
+        isbn=payload.get("isbn", ""), publisher=payload.get("publisher", ""),
     )
 
     # 已存档过，直接本地命中，不再访问 Z-Library
